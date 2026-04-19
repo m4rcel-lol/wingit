@@ -22,23 +22,19 @@
       UpgradeCode="{C5B9D7E3-4F60-5B2C-9D7E-34F605B2C9D7}">
 
     <BootstrapperApplication>
-      <BootstrapperApplicationRef Id="WixStandardBootstrapperApplication.RtfLicense">
-        <bal:WixStandardBootstrapperApplication
-            LicenseFile="License.rtf"
-            ShowVersion="yes"
-            SuppressOptionsUI="yes" />
-      </BootstrapperApplicationRef>
+      <bal:WixStandardBootstrapperApplication
+          LicenseFile="License.rtf"
+          ShowVersion="yes"
+          SuppressOptionsUI="yes" />
     </BootstrapperApplication>
 
     <Chain>
       <!--
           Install the MSI silently through the Burn engine.
-          DisplayInternalUI="no" keeps the single-EXE experience consistent:
-          users interact only with the bundle UI, not a second MSI dialog.
+          Users interact only with the bundle UI, not a second MSI dialog.
       -->
       <MsiPackage
           SourceFile="$(var.MsiPath)"
-          DisplayInternalUI="no"
           ForcePerMachine="yes" />
     </Chain>
 
