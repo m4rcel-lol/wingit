@@ -85,7 +85,7 @@ jobs:
             -d "MsiPath=$msi" `
             -ext WixToolset.Bal.wixext `
             -arch x64 `
-            -basepath installer `
+            -bindpath installer `
             -o $exe
           Write-Host "Built: $exe"
 
