@@ -206,6 +206,17 @@ function Write-Blank {
     Write-Host ''
 }
 
+function Write-Trace {
+    <#
+    .SYNOPSIS Writes a verbose diagnostic line, only when $script:VerboseMode is true.
+    .PARAMETER Message The diagnostic message to display.
+    #>
+    param([Parameter(Mandatory)] [string] $Message)
+    if ($script:VerboseMode) {
+        Write-Host "  [v] $Message" -ForegroundColor DarkGray
+    }
+}
+
 function Show-Spinner {
     <#
     .SYNOPSIS Displays an inline spinner for long-running operations.

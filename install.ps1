@@ -44,7 +44,7 @@ if (-not (Test-Path $InstallDir)) {
 
 # ── Copy files ───────────────────────────────────────────────────────────────
 $filesToCopy = @(
-    'wingit.ps1',
+    'wingit-core.ps1',
     'wingit.cmd'
 )
 

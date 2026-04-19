@@ -10,9 +10,12 @@ it locally when no binary release exists.
 
 - **Release install** — downloads the best Windows binary asset (`.msi`, `.exe`, `.zip`, `.tar.gz`) from the latest GitHub release.
 - **Source build** — auto-detects the build system (CMake, Cargo, Go, npm, Python, Gradle, Maven, MSBuild, Meson, Make) and compiles from source.
+- **Update** — updates an installed package to the latest version, or updates all packages at once with `--all`.
+- **Info** — shows GitHub metadata and local install details for any package.
 - **Dependency bootstrapping** — installs missing build tools automatically via Chocolatey, with direct-installer fallback.
 - **rpm-ostree-style output** — structured, phase-labelled terminal output with progress bars and spinners.
-- **CMD & PowerShell** — works identically from both `cmd.exe` and `powershell.exe`.
+- **CMD & PowerShell** — works identically from both `cmd.exe` and `powershell.exe` (no execution-policy errors).
+- **Verbose mode** — pass `-v` or `--verbose` to see diagnostic URLs and extra detail.
 - **Package registry** — tracks installed packages in `%PROGRAMDATA%\WinGit\registry.json`.
 - **GitHub API auth** — set `GITHUB_TOKEN` to increase the API rate limit from 60 to 5,000 requests/hour.
 
@@ -36,10 +39,19 @@ Then open a new terminal — `wingit` will be on your PATH.
 
 ```
 wingit install <owner>/<repo>   Install a package from GitHub
+wingit update  <owner>/<repo>   Update an installed package to the latest version
+wingit update  --all            Update all packages installed by WinGit
 wingit remove  <owner>/<repo>   Remove an installed package
+wingit info    <owner>/<repo>   Show information about a package
 wingit list                     List packages installed by WinGit
 wingit --version                Print WinGit version
 wingit --help                   Show help
+```
+
+### Options
+
+```
+-v, --verbose   Show verbose diagnostic output (API URLs, paths, extra detail)
 ```
 
 ### Examples
@@ -54,11 +66,23 @@ wingit install neovim/neovim
 # Install ripgrep
 wingit install BurntSushi/ripgrep
 
+# Update a package to the latest version
+wingit update cli/cli
+
+# Update all installed packages
+wingit update --all
+
+# Show package info (GitHub metadata + local install details)
+wingit info cli/cli
+
 # List installed packages
 wingit list
 
 # Remove a package
 wingit remove cli/cli
+
+# Install with verbose diagnostic output
+wingit install cli/cli -v
 ```
 
 ### Environment variables
@@ -80,6 +104,7 @@ Resolving    cli/cli...
   Repository : https://github.com/cli/cli
   Stars      : 37,842
   Language   : Go
+  About      : GitHub's official command line tool
 
 Checking     releases...
   Latest     : v2.62.0  (2024-11-15)
@@ -102,8 +127,8 @@ Complete.
 
 ```
 WinGit/
-├── wingit.cmd          ← Entry point for CMD and PowerShell
-├── wingit.ps1          ← Core logic (argument parsing + command dispatch)
+├── wingit.cmd          ← Entry point for CMD and PowerShell (uses -ExecutionPolicy Bypass)
+├── wingit-core.ps1     ← Core logic (argument parsing + command dispatch)
 ├── lib/
 │   ├── api.ps1         ← GitHub API functions
 │   ├── download.ps1    ← Download + progress bar utilities
@@ -115,6 +140,11 @@ WinGit/
 ├── install.ps1         ← WinGit self-installer
 └── README.md
 ```
+
+> **Note:** The core logic lives in `wingit-core.ps1`, not `wingit.ps1`. This ensures
+> that typing `wingit` in PowerShell resolves to `wingit.cmd` (which passes
+> `-ExecutionPolicy Bypass`), rather than directly invoking the `.ps1` script and
+> hitting an execution-policy error.
 
 ---
 

@@ -60,6 +60,7 @@ function Invoke-GitHubApi {
 
             if ($attempt -lt $MaxRetries) {
                 Write-WarnMsg "GitHub API request failed (attempt $attempt/$MaxRetries). Retrying in ${delay}s..."
+                Write-Trace "Error detail: $($_.Exception.Message)"
                 Start-Sleep -Seconds $delay
                 $delay *= 2
             } else {
