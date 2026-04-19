@@ -48,6 +48,13 @@ if (-not $Command -and $ExtraArgs -and $ExtraArgs.Count -gt 0) {
     $ExtraArgs = if ($ExtraArgs.Count -gt 2) { $ExtraArgs[2..($ExtraArgs.Count-1)] } else { @() }
 }
 
+# If Command is set but Target is still empty, check if ExtraArgs has a positional value
+# (e.g. 'wingit update --all' binds '--all' to ExtraArgs, not to $Target position)
+if ($Command -and -not $Target -and $ExtraArgs -and $ExtraArgs.Count -gt 0) {
+    $Target    = [string]$ExtraArgs[0]
+    $ExtraArgs = if ($ExtraArgs.Count -gt 1) { $ExtraArgs[1..($ExtraArgs.Count-1)] } else { @() }
+}
+
 # ── Load library modules ────────────────────────────────────────────────────
 $libDir = [System.IO.Path]::Combine($PSScriptRoot, 'lib')
 
