@@ -9,32 +9,45 @@
 
 # Mapping: tool name -> Chocolatey package id
 $script:ChocoPackages = @{
-    cmake   = 'cmake'
-    ninja   = 'ninja'
-    make    = 'make'
-    cargo   = 'rust'
-    rustc   = 'rust'
-    node    = 'nodejs'
-    npm     = 'nodejs'
-    python  = 'python'
-    pip     = 'python'
-    java    = 'openjdk'
-    gradle  = 'gradle'
-    mvn     = 'maven'
-    msbuild = 'visualstudio2022buildtools'
-    go      = 'golang'
-    git     = 'git'
+    cmake          = 'cmake'
+    ninja          = 'ninja'
+    make           = 'make'
+    'mingw32-make' = 'mingw'
+    cargo          = 'rust'
+    rustc          = 'rust'
+    node           = 'nodejs'
+    npm            = 'nodejs'
+    python         = 'python'
+    python3        = 'python'
+    pip            = 'python'
+    pip3           = 'python'
+    java           = 'openjdk'
+    gradle         = 'gradle'
+    mvn            = 'maven'
+    msbuild        = 'visualstudio2022buildtools'
+    go             = 'golang'
+    git            = 'git'
+    dotnet         = 'dotnet-sdk'
+    ruby           = 'ruby'
+    bundle         = 'ruby'
+    deno           = 'deno'
+    zig            = 'zig'
+    just           = 'just'
+    swift          = 'swift'
 }
 
 # Mapping: tool name -> direct installer URL resolver function name
 $script:DirectInstallers = @{
-    cmake  = 'Get-CmakeInstallerUrl'
-    git    = 'Get-GitInstallerUrl'
-    node   = 'Get-NodeInstallerUrl'
-    python = 'Get-PythonInstallerUrl'
-    cargo  = 'Get-RustInstallerUrl'
-    rustc  = 'Get-RustInstallerUrl'
-    go     = 'Get-GoInstallerUrl'
+    cmake   = 'Get-CmakeInstallerUrl'
+    git     = 'Get-GitInstallerUrl'
+    node    = 'Get-NodeInstallerUrl'
+    python  = 'Get-PythonInstallerUrl'
+    python3 = 'Get-PythonInstallerUrl'
+    cargo   = 'Get-RustInstallerUrl'
+    rustc   = 'Get-RustInstallerUrl'
+    go      = 'Get-GoInstallerUrl'
+    dotnet  = 'Get-DotNetInstallerUrl'
+    deno    = 'Get-DenoInstallerUrl'
 }
 
 function Test-ToolOnPath {
@@ -178,6 +191,35 @@ function Get-GoInstallerUrl {
     return $null
 }
 
+function Get-DotNetInstallerUrl {
+    <#
+    .SYNOPSIS Returns the latest .NET SDK Windows x64 installer URL via the GitHub API.
+    #>
+    $release = Invoke-GitHubApi 'https://api.github.com/repos/dotnet/sdk/releases/latest'
+    if ($release -and $release.assets) {
+        $asset = $release.assets |
+            Where-Object { $_.name -like '*win-x64.exe' } |
+            Select-Object -First 1
+        if ($asset) { return $asset.browser_download_url }
+    }
+    # Fallback to the official dotnet-install script approach (downloads the SDK)
+    return 'https://dot.net/v1/dotnet-install.ps1'
+}
+
+function Get-DenoInstallerUrl {
+    <#
+    .SYNOPSIS Returns the latest Deno Windows x64 zip URL via the GitHub API.
+    #>
+    $release = Invoke-GitHubApi 'https://api.github.com/repos/denoland/deno/releases/latest'
+    if ($release -and $release.assets) {
+        $asset = $release.assets |
+            Where-Object { $_.name -like 'deno-x86_64-pc-windows-msvc.zip' } |
+            Select-Object -First 1
+        if ($asset) { return $asset.browser_download_url }
+    }
+    return $null
+}
+
 function Install-ToolDirect {
     <#
     .SYNOPSIS
@@ -297,8 +339,14 @@ function Assert-BuildTools {
     $found   = @()
 
     foreach ($tool in $RequiredTools) {
-        if (Test-ToolOnPath $tool) {
-            $version = & $tool --version 2>&1 | Select-Object -First 1
+        # For python/pip, also accept python3/pip3 as equivalent
+        $aliases = @{ python = @('python', 'python3'); pip = @('pip', 'pip3') }
+        $candidates = if ($aliases.ContainsKey($tool)) { $aliases[$tool] } else { @($tool) }
+
+        $resolvedTool = $candidates | Where-Object { Test-ToolOnPath $_ } | Select-Object -First 1
+
+        if ($resolvedTool) {
+            $version = & $resolvedTool --version 2>&1 | Select-Object -First 1
             Write-StatusOk -Label $tool -Detail $version
             $found += $tool
         } else {
