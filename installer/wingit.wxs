@@ -41,7 +41,7 @@
     <ui:WixUI Id="WixUI_InstallDir" />
 
     <!-- Wire the license RTF into the UI. -->
-    <WixVariable Id="WixUILicenseRtf" Value="License.rtf" />
+    <WixVariable Id="WixUILicenseRtf" Value="installer\License.rtf" />
 
     <Feature Id="ProductFeature" Title="WinGit" Level="1">
       <ComponentGroupRef Id="CoreComponents" />
@@ -53,13 +53,11 @@
 
   <!-- ── Directory tree ─────────────────────────────────────────────────── -->
   <Fragment>
-    <Directory Id="TARGETDIR" Name="SourceDir">
-      <Directory Id="ProgramFiles64Folder">
-        <Directory Id="INSTALLFOLDER" Name="WinGit">
-          <Directory Id="LibFolder" Name="lib" />
-        </Directory>
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="WinGit">
+        <Directory Id="LibFolder" Name="lib" />
       </Directory>
-    </Directory>
+    </StandardDirectory>
   </Fragment>
 
   <!-- ── Components ─────────────────────────────────────────────────────── -->
@@ -68,35 +66,35 @@
     <!-- Main scripts installed to %ProgramFiles%\WinGit -->
     <ComponentGroup Id="CoreComponents" Directory="INSTALLFOLDER">
       <Component Id="MainScript">
-        <File Source="..\wingit.ps1" KeyPath="yes" />
+        <File Source="wingit.ps1" KeyPath="yes" />
       </Component>
       <Component Id="CmdWrapper">
-        <File Source="..\wingit.cmd" KeyPath="yes" />
+        <File Source="wingit.cmd" KeyPath="yes" />
       </Component>
     </ComponentGroup>
 
     <!-- Library modules installed to %ProgramFiles%\WinGit\lib -->
     <ComponentGroup Id="LibComponents" Directory="LibFolder">
       <Component Id="LibApi">
-        <File Source="..\lib\api.ps1" KeyPath="yes" />
+        <File Source="lib\api.ps1" KeyPath="yes" />
       </Component>
       <Component Id="LibBuild">
-        <File Source="..\lib\build.ps1" KeyPath="yes" />
+        <File Source="lib\build.ps1" KeyPath="yes" />
       </Component>
       <Component Id="LibDownload">
-        <File Source="..\lib\download.ps1" KeyPath="yes" />
+        <File Source="lib\download.ps1" KeyPath="yes" />
       </Component>
       <Component Id="LibElevation">
-        <File Source="..\lib\elevation.ps1" KeyPath="yes" />
+        <File Source="lib\elevation.ps1" KeyPath="yes" />
       </Component>
       <Component Id="LibOutput">
-        <File Source="..\lib\output.ps1" KeyPath="yes" />
+        <File Source="lib\output.ps1" KeyPath="yes" />
       </Component>
       <Component Id="LibRegistry">
-        <File Source="..\lib\registry.ps1" KeyPath="yes" />
+        <File Source="lib\registry.ps1" KeyPath="yes" />
       </Component>
       <Component Id="LibTools">
-        <File Source="..\lib\tools.ps1" KeyPath="yes" />
+        <File Source="lib\tools.ps1" KeyPath="yes" />
       </Component>
     </ComponentGroup>
 
