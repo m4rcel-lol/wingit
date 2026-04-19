@@ -23,6 +23,7 @@
 
     <BootstrapperApplication>
       <bal:WixStandardBootstrapperApplication
+          Theme="standard"
           LicenseFile="License.rtf"
           ShowVersion="yes"
           SuppressOptionsUI="yes" />
