@@ -173,7 +173,7 @@ function Invoke-GoBuild {
         $binDir = [System.IO.Path]::Combine($InstallDir, 'bin')
         if (-not (Test-Path $binDir)) { New-Item -ItemType Directory -Path $binDir -Force | Out-Null }
 
-        Get-ChildItem -Path $SourceDir -Filter '*.exe' -Depth 0 |
+        Get-ChildItem -Path $SourceDir -Filter '*.exe' |
             Copy-Item -Destination $binDir -Force
 
         Write-SubItem 'Binaries' "→ $binDir"

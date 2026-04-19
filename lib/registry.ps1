@@ -147,7 +147,7 @@ function Show-InstalledPackages {
         $ver  = ($e.version -replace '^v','').PadRight($colVer)
         $type = $e.install_type.PadRight($colType)
         $date = if ($e.installed_at) {
-            ([datetime]::Parse($e.installed_at)).ToString('yyyy-MM-dd')
+            ([datetime]::Parse($e.installed_at, $null, [System.Globalization.DateTimeStyles]::RoundtripKind)).ToString('yyyy-MM-dd')
         } else { '?' }
 
         Write-Host "$pkg$ver$type$date"

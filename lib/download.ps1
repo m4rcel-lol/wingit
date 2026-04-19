@@ -102,10 +102,12 @@ function Invoke-CurlDownload {
         }
 
         # Parse http_code from write-out (last non-empty line)
-        $lines    = ($info -split "`n") | Where-Object { $_.Trim() }
-        $httpCode = [int]($lines[-1])
-        if ($httpCode -lt 200 -or $httpCode -ge 400) {
-            throw "HTTP $httpCode received from server."
+        $lines = @(($info -split "`n") | Where-Object { $_.Trim() })
+        if ($lines.Count -gt 0) {
+            $httpCode = [int]($lines[-1])
+            if ($httpCode -lt 200 -or $httpCode -ge 400) {
+                throw "HTTP $httpCode received from server."
+            }
         }
     } finally {
         Remove-Item $progressFile -Force -ErrorAction SilentlyContinue
@@ -133,14 +135,14 @@ function Invoke-WebRequestDownload {
 
     $headers = @{ 'User-Agent' = 'WinGit/1.0' }
     if ($env:GITHUB_TOKEN -and $Url -like '*api.github.com*') {
-        $headers['Authorization'] = "Bearer $env:GITHUB_TOKEN"
+        $headers['Authorization'] = "token $env:GITHUB_TOKEN"
     }
 
     # Stream download with manual progress tracking
     $request  = [System.Net.HttpWebRequest]::Create($Url)
     $request.UserAgent = 'WinGit/1.0'
     if ($env:GITHUB_TOKEN -and $Url -like '*api.github.com*') {
-        $request.Headers['Authorization'] = "Bearer $env:GITHUB_TOKEN"
+        $request.Headers['Authorization'] = "token $env:GITHUB_TOKEN"
     }
     $request.AllowAutoRedirect = $true
 

@@ -29,7 +29,7 @@ function Invoke-GitHubApi {
     }
 
     if ($env:GITHUB_TOKEN) {
-        $headers['Authorization'] = "Bearer $env:GITHUB_TOKEN"
+        $headers['Authorization'] = "token $env:GITHUB_TOKEN"
     }
 
     $delay = 1
