@@ -46,7 +46,7 @@ jobs:
       - name: Install WiX Toolset v4
         shell: pwsh
         run: |
-          dotnet tool install --global wix
+          dotnet tool install --global wix --version '4.*'
           # Ensure the dotnet global tools directory is on PATH for subsequent steps
           "$env:USERPROFILE\.dotnet\tools" | Out-File -FilePath $env:GITHUB_PATH -Append
 
