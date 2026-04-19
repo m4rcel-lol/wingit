@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    WinGit EXE bundle definition (WiX v4 / Burn).
+    This bootstrapper wraps the MSI and presents a polished installer UI.
+
+    Build (after the MSI has already been produced):
+        wix build installer\bundle.wxs ^
+            -d Version=1.0.0 ^
+            -d MsiPath=installer\WinGit-1.0.0.msi ^
+            -ext WixToolset.Bal.wixext ^
+            -arch x64 ^
+            -o installer\WinGit-1.0.0-setup.exe
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:bal="http://wixtoolset.org/schemas/v4/wxs/bal">
+
+  <Bundle
+      Name="WinGit"
+      Version="$(var.Version)"
+      Manufacturer="WinGit Project"
+      AboutUrl="https://github.com/m4rcel-lol/wingit"
+      UpgradeCode="{C5B9D7E3-4F60-5B2C-9D7E-34F605B2C9D7}">
+
+    <BootstrapperApplication>
+      <BootstrapperApplicationRef Id="WixStandardBootstrapperApplication.RtfLicense">
+        <bal:WixStandardBootstrapperApplication
+            LicenseFile="License.rtf"
+            ShowVersion="yes"
+            SuppressOptionsUI="yes" />
+      </BootstrapperApplicationRef>
+    </BootstrapperApplication>
+
+    <Chain>
+      <!--
+          Install the MSI silently through the Burn engine.
+          DisplayInternalUI="no" keeps the single-EXE experience consistent:
+          users interact only with the bundle UI, not a second MSI dialog.
+      -->
+      <MsiPackage
+          SourceFile="$(var.MsiPath)"
+          DisplayInternalUI="no"
+          ForcePerMachine="yes" />
+    </Chain>
+
+  </Bundle>
+
+</Wix>

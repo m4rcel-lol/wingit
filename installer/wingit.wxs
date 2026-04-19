@@ -1,0 +1,131 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    WinGit MSI product definition (WiX v4).
+    Build:
+        wix build installer\wingit.wxs ^
+            -d Version=1.0.0 ^
+            -ext WixToolset.UI.wixext ^
+            -ext WixToolset.Util.wixext ^
+            -arch x64 ^
+            -o installer\WinGit-1.0.0.msi
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+
+  <Package
+      Name="WinGit"
+      Manufacturer="WinGit Project"
+      Version="$(var.Version)"
+      UpgradeCode="{B4A8C6D2-3E5F-4A1B-8C6D-23E5F4A1B8C6}"
+      Scope="perMachine">
+
+    <SummaryInformation
+        Description="WinGit — GitHub-native package manager for Windows"
+        Keywords="WinGit,GitHub,package manager,Windows" />
+
+    <!--
+        Remove any older version before installing this one.
+        Prevents side-by-side installations and keeps the registry clean.
+    -->
+    <MajorUpgrade
+        DowngradeErrorMessage="A newer version of WinGit is already installed. Please uninstall it first." />
+
+    <!-- Embed cabinet inside the MSI so it is a single file. -->
+    <MediaTemplate EmbedCab="yes" />
+
+    <!--
+        WixUI_InstallDir gives the user a license screen + directory picker.
+        WIXUI_INSTALLDIR must point to the directory ID used below.
+    -->
+    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
+    <ui:WixUI Id="WixUI_InstallDir" />
+
+    <!-- Wire the license RTF into the UI. -->
+    <WixVariable Id="WixUILicenseRtf" Value="License.rtf" />
+
+    <Feature Id="ProductFeature" Title="WinGit" Level="1">
+      <ComponentGroupRef Id="CoreComponents" />
+      <ComponentGroupRef Id="LibComponents" />
+      <ComponentGroupRef Id="EnvironmentComponents" />
+    </Feature>
+
+  </Package>
+
+  <!-- ── Directory tree ─────────────────────────────────────────────────── -->
+  <Fragment>
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLFOLDER" Name="WinGit">
+          <Directory Id="LibFolder" Name="lib" />
+        </Directory>
+      </Directory>
+    </Directory>
+  </Fragment>
+
+  <!-- ── Components ─────────────────────────────────────────────────────── -->
+  <Fragment>
+
+    <!-- Main scripts installed to %ProgramFiles%\WinGit -->
+    <ComponentGroup Id="CoreComponents" Directory="INSTALLFOLDER">
+      <Component Id="MainScript">
+        <File Source="..\wingit.ps1" KeyPath="yes" />
+      </Component>
+      <Component Id="CmdWrapper">
+        <File Source="..\wingit.cmd" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <!-- Library modules installed to %ProgramFiles%\WinGit\lib -->
+    <ComponentGroup Id="LibComponents" Directory="LibFolder">
+      <Component Id="LibApi">
+        <File Source="..\lib\api.ps1" KeyPath="yes" />
+      </Component>
+      <Component Id="LibBuild">
+        <File Source="..\lib\build.ps1" KeyPath="yes" />
+      </Component>
+      <Component Id="LibDownload">
+        <File Source="..\lib\download.ps1" KeyPath="yes" />
+      </Component>
+      <Component Id="LibElevation">
+        <File Source="..\lib\elevation.ps1" KeyPath="yes" />
+      </Component>
+      <Component Id="LibOutput">
+        <File Source="..\lib\output.ps1" KeyPath="yes" />
+      </Component>
+      <Component Id="LibRegistry">
+        <File Source="..\lib\registry.ps1" KeyPath="yes" />
+      </Component>
+      <Component Id="LibTools">
+        <File Source="..\lib\tools.ps1" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <!--
+        PATH registration.
+        A RegistryValue is used as KeyPath so Windows Installer tracks the
+        component correctly; the Environment element then appends the install
+        folder to the system PATH.
+    -->
+    <ComponentGroup Id="EnvironmentComponents" Directory="INSTALLFOLDER">
+      <Component Id="PathRegistration">
+        <RegistryValue
+            Root="HKLM"
+            Key="Software\WinGit"
+            Name="InstallDir"
+            Value="[INSTALLFOLDER]"
+            Type="string"
+            KeyPath="yes" />
+        <Environment
+            Id="WinGitSystemPath"
+            Name="PATH"
+            Value="[INSTALLFOLDER]"
+            Permanent="no"
+            Part="last"
+            Action="set"
+            System="yes" />
+      </Component>
+    </ComponentGroup>
+
+  </Fragment>
+
+</Wix>
