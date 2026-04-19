@@ -347,8 +347,15 @@ function Assert-BuildTools {
 
         if ($resolvedTool) {
             $version = & $resolvedTool --version 2>&1 | Select-Object -First 1
-            Write-StatusOk -Label $tool -Detail $version
-            $found += $tool
+            if ($LASTEXITCODE -eq 0) {
+                Write-StatusOk -Label $tool -Detail $version
+                $found += $tool
+            } else {
+                # Tool stub found on PATH but non-functional (e.g. Windows App Execution
+                # Alias for python.exe that opens the Microsoft Store instead of running).
+                Write-StatusNotFound -Label $tool
+                $missing += $tool
+            }
         } else {
             Write-StatusNotFound -Label $tool
             $missing += $tool
@@ -363,8 +370,16 @@ function Assert-BuildTools {
     Write-Phase 'Installing' 'missing tools...'
     $results = Install-MissingTools -MissingTools $missing
 
-    # Verify all required tools are now available
-    $unavailable = $RequiredTools | Where-Object { -not (Test-ToolOnPath $_) }
+    # Verify all required tools are now available (confirm they actually work, not just stubs)
+    $unavailable = $RequiredTools | Where-Object {
+        $candidates = if ($_ -eq 'python') { @('python', 'python3') }
+                      elseif ($_ -eq 'pip') { @('pip', 'pip3') }
+                      else { @($_) }
+        $resolved = $candidates | Where-Object { Test-ToolOnPath $_ } | Select-Object -First 1
+        if (-not $resolved) { return $true }
+        & $resolved --version 2>&1 | Out-Null
+        return $LASTEXITCODE -ne 0
+    }
     if ($unavailable) {
         Write-ErrorMsg "The following tools could not be installed: $($unavailable -join ', ')" -ExitCode 1
     }
