@@ -104,9 +104,13 @@ function Invoke-CurlDownload {
         # Parse http_code from write-out (last non-empty line)
         $lines = @(($info -split "`n") | Where-Object { $_.Trim() })
         if ($lines.Count -gt 0) {
-            $httpCode = [int]($lines[-1])
-            if ($httpCode -lt 200 -or $httpCode -ge 400) {
-                throw "HTTP $httpCode received from server."
+            try {
+                $httpCode = [int]($lines[-1])
+                if ($httpCode -lt 200 -or $httpCode -ge 400) {
+                    throw "HTTP $httpCode received from server."
+                }
+            } catch [System.FormatException] {
+                # Could not parse HTTP code — assume success if file was written
             }
         }
     } finally {

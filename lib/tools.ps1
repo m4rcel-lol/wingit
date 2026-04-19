@@ -133,6 +133,7 @@ function Get-NodeInstallerUrl {
     .SYNOPSIS Returns the latest Node.js Windows x64 MSI URL.
     #>
     try {
+        $ProgressPreference = 'SilentlyContinue'
         $index = Invoke-WebRequest -Uri 'https://nodejs.org/dist/latest/' -UseBasicParsing -ErrorAction Stop
         $match = [regex]::Match($index.Content, 'node-v[\d.]+-x64\.msi')
         if ($match.Success) {
@@ -147,6 +148,7 @@ function Get-PythonInstallerUrl {
     .SYNOPSIS Returns the latest CPython Windows x64 installer URL.
     #>
     try {
+        $ProgressPreference = 'SilentlyContinue'
         $page  = Invoke-WebRequest -Uri 'https://www.python.org/downloads/windows/' -UseBasicParsing -ErrorAction Stop
         $match = [regex]::Match($page.Content, 'https://www\.python\.org/ftp/python/[\d.]+/python-[\d.]+-amd64\.exe')
         if ($match.Success) { return $match.Value }
@@ -166,6 +168,7 @@ function Get-GoInstallerUrl {
     .SYNOPSIS Returns the latest Go Windows amd64 MSI URL.
     #>
     try {
+        $ProgressPreference = 'SilentlyContinue'
         $page  = Invoke-WebRequest -Uri 'https://go.dev/dl/' -UseBasicParsing -ErrorAction Stop
         $match = [regex]::Match($page.Content, 'go[\d.]+\.windows-amd64\.msi')
         if ($match.Success) {

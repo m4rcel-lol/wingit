@@ -51,7 +51,7 @@ $script:Version = '1.0.0'
 function Resolve-OwnerRepo {
     param([Parameter(Mandatory)] [string] $PackageTarget)
 
-    if ($PackageTarget -match '^([A-Za-z0-9_\-]+)/([A-Za-z0-9_\-]+)$') {
+    if ($PackageTarget -match '^([A-Za-z0-9_.\-]+)/([A-Za-z0-9_.\-]+)$') {
         return @{ Owner = $Matches[1]; Repo = $Matches[2] }
     }
     Write-ErrorMsg "Invalid target format '$PackageTarget'. Expected: <owner>/<repo>" -ExitCode 1

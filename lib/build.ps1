@@ -33,7 +33,11 @@ function Find-BuildSystem {
 
     foreach ($bs in $script:BuildSystems) {
         foreach ($pattern in $bs.Files) {
-            $match = Get-ChildItem -Path $SourceDir -Filter $pattern -ErrorAction SilentlyContinue | Select-Object -First 1
+            # Use -Recurse for wildcard patterns (e.g. *.sln) since solution files
+            # may not always be at the root; exact filenames are checked at root level.
+            $searchArgs = @{ Path = $SourceDir; Filter = $pattern; ErrorAction = 'SilentlyContinue' }
+            if ($pattern.Contains('*')) { $searchArgs['Recurse'] = $true }
+            $match = Get-ChildItem @searchArgs | Select-Object -First 1
             if ($match) {
                 return @{
                     Name      = $bs.Name

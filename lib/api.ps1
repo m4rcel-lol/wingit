@@ -35,7 +35,10 @@ function Invoke-GitHubApi {
     $delay = 1
     for ($attempt = 1; $attempt -le $MaxRetries; $attempt++) {
         try {
+            $prevPref = $ProgressPreference
+            $ProgressPreference = 'SilentlyContinue'
             $response = Invoke-WebRequest -Uri $Url -Headers $headers -UseBasicParsing -ErrorAction Stop
+            $ProgressPreference = $prevPref
             return ($response.Content | ConvertFrom-Json)
         } catch {
             $statusCode = 0
@@ -49,7 +52,7 @@ function Invoke-GitHubApi {
 
             if ($statusCode -eq 403) {
                 $remaining = $_.Exception.Response.Headers['X-RateLimit-Remaining']
-                if ($remaining -eq '0') {
+                if ($remaining -and $remaining -eq '0') {
                     Write-ErrorMsg ('GitHub API rate limit exceeded. Set the GITHUB_TOKEN environment variable ' +
                                    'to increase the limit from 60 to 5,000 requests/hour.') -ExitCode 1
                 }
