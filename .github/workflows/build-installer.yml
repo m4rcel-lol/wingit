@@ -1,0 +1,117 @@
+name: Build Installer
+
+on:
+  push:
+    branches: [main, master]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [main, master]
+
+permissions:
+  contents: write   # needed to create GitHub Releases
+
+jobs:
+  build-installer:
+    name: Build WinGit EXE Installer
+    runs-on: windows-latest
+
+    steps:
+      # ── 1. Source ────────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Version ───────────────────────────────────────────────────────────
+      - name: Extract version from wingit.ps1
+        id: version
+        shell: pwsh
+        run: |
+          $content = Get-Content wingit.ps1 -Raw
+          if ($content -match '\$script:Version\s*=\s*''([^'']+)''') {
+            $ver = $Matches[1]
+          } else {
+            Write-Warning "Could not parse version from wingit.ps1; defaulting to 0.0.0"
+            $ver = '0.0.0'
+          }
+          Write-Host "Detected version: $ver"
+          "version=$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      # ── 3. .NET (required by the WiX dotnet tool) ────────────────────────────
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.x'
+
+      # ── 4. WiX v4 ────────────────────────────────────────────────────────────
+      - name: Install WiX Toolset v4
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix
+          # Ensure the dotnet global tools directory is on PATH for subsequent steps
+          "$env:USERPROFILE\.dotnet\tools" | Out-File -FilePath $env:GITHUB_PATH -Append
+
+      - name: Add WiX extensions
+        shell: pwsh
+        run: |
+          wix extension add WixToolset.UI.wixext --global
+          wix extension add WixToolset.Bal.wixext --global
+          wix extension add WixToolset.Util.wixext --global
+
+      # ── 5. MSI ───────────────────────────────────────────────────────────────
+      - name: Build MSI
+        shell: pwsh
+        env:
+          WINGIT_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $msi = "installer\WinGit-$env:WINGIT_VERSION.msi"
+          wix build installer\wingit.wxs `
+            -d "Version=$env:WINGIT_VERSION" `
+            -ext WixToolset.UI.wixext `
+            -ext WixToolset.Util.wixext `
+            -arch x64 `
+            -o $msi
+          Write-Host "Built: $msi"
+
+      # ── 6. EXE bundle ────────────────────────────────────────────────────────
+      - name: Build EXE bundle
+        shell: pwsh
+        env:
+          WINGIT_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $msi  = "installer\WinGit-$env:WINGIT_VERSION.msi"
+          $exe  = "installer\WinGit-$env:WINGIT_VERSION-setup.exe"
+          wix build installer\bundle.wxs `
+            -d "Version=$env:WINGIT_VERSION" `
+            -d "MsiPath=$msi" `
+            -ext WixToolset.Bal.wixext `
+            -arch x64 `
+            -o $exe
+          Write-Host "Built: $exe"
+
+      # ── 7. Artifacts ─────────────────────────────────────────────────────────
+      - name: Upload MSI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: WinGit-${{ steps.version.outputs.version }}-msi
+          path: installer/WinGit-${{ steps.version.outputs.version }}.msi
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload EXE artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: WinGit-${{ steps.version.outputs.version }}-setup
+          path: installer/WinGit-${{ steps.version.outputs.version }}-setup.exe
+          if-no-files-found: error
+          retention-days: 30
+
+      # ── 8. GitHub Release (tag pushes only) ──────────────────────────────────
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: WinGit ${{ steps.version.outputs.version }}
+          generate_release_notes: true
+          files: |
+            installer/WinGit-${{ steps.version.outputs.version }}.msi
+            installer/WinGit-${{ steps.version.outputs.version }}-setup.exe
