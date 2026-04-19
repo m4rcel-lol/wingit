@@ -9,16 +9,22 @@
 
 # Priority-ordered list of build system descriptors
 $script:BuildSystems = @(
-    @{ Name = 'CMake';   Files = @('CMakeLists.txt');                            Tools = @('cmake', 'ninja') }
-    @{ Name = 'Make';    Files = @('Makefile');                                  Tools = @('mingw32-make') }
-    @{ Name = 'Meson';   Files = @('meson.build');                               Tools = @('meson', 'ninja') }
-    @{ Name = 'Cargo';   Files = @('Cargo.toml');                                Tools = @('cargo') }
-    @{ Name = 'npm';     Files = @('package.json');                              Tools = @('node', 'npm') }
-    @{ Name = 'Python';  Files = @('setup.py', 'pyproject.toml');                Tools = @('python', 'pip') }
-    @{ Name = 'Gradle';  Files = @('build.gradle', 'build.gradle.kts');          Tools = @('java', 'gradle') }
-    @{ Name = 'Maven';   Files = @('pom.xml');                                   Tools = @('java', 'mvn') }
-    @{ Name = 'MSBuild'; Files = @('*.sln', '*.vcxproj');                        Tools = @('msbuild') }
-    @{ Name = 'Go';      Files = @('go.mod');                                    Tools = @('go') }
+    @{ Name = 'CMake';   Files = @('CMakeLists.txt');                                        Tools = @('cmake', 'ninja') }
+    @{ Name = 'Make';    Files = @('Makefile');                                              Tools = @('mingw32-make') }
+    @{ Name = 'Meson';   Files = @('meson.build');                                           Tools = @('meson', 'ninja') }
+    @{ Name = 'Cargo';   Files = @('Cargo.toml');                                            Tools = @('cargo') }
+    @{ Name = 'npm';     Files = @('package.json');                                          Tools = @('node', 'npm') }
+    @{ Name = 'Python';  Files = @('setup.py', 'setup.cfg', 'pyproject.toml', 'requirements.txt'); Tools = @('python', 'pip') }
+    @{ Name = 'Gradle';  Files = @('build.gradle', 'build.gradle.kts');                     Tools = @('java', 'gradle') }
+    @{ Name = 'Maven';   Files = @('pom.xml');                                               Tools = @('java', 'mvn') }
+    @{ Name = 'MSBuild'; Files = @('*.sln', '*.vcxproj');                                   Tools = @('msbuild') }
+    @{ Name = 'Go';      Files = @('go.mod');                                                Tools = @('go') }
+    @{ Name = 'DotNet';  Files = @('*.csproj', '*.fsproj', '*.vbproj');                     Tools = @('dotnet') }
+    @{ Name = 'Ruby';    Files = @('Gemfile');                                               Tools = @('ruby', 'bundle') }
+    @{ Name = 'Deno';    Files = @('deno.json', 'deno.jsonc');                               Tools = @('deno') }
+    @{ Name = 'Zig';     Files = @('build.zig');                                             Tools = @('zig') }
+    @{ Name = 'Swift';   Files = @('Package.swift');                                         Tools = @('swift') }
+    @{ Name = 'Just';    Files = @('justfile', 'Justfile');                                  Tools = @('just') }
 )
 
 function Find-BuildSystem {
@@ -38,6 +44,12 @@ function Find-BuildSystem {
             $searchArgs = @{ Path = $SourceDir; Filter = $pattern; ErrorAction = 'SilentlyContinue' }
             if ($pattern.Contains('*')) { $searchArgs['Recurse'] = $true }
             $match = Get-ChildItem @searchArgs | Select-Object -First 1
+            if (-not $match) {
+                # Case-insensitive fallback for systems like 'justfile' / 'Justfile'
+                $match = Get-ChildItem -Path $SourceDir -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Name -ieq $pattern } |
+                    Select-Object -First 1
+            }
             if ($match) {
                 return @{
                     Name      = $bs.Name
@@ -134,22 +146,47 @@ function Invoke-NpmBuild {
 
 function Invoke-PythonBuild {
     <#
-    .SYNOPSIS Runs the Python build sequence.
+    .SYNOPSIS Runs the Python build/install sequence.
+    .DESCRIPTION
+        Supports setup.py, setup.cfg, pyproject.toml, and requirements.txt projects.
+        Falls back to python3/pip3 when python/pip are not on PATH.
     .PARAMETER SourceDir Source root directory.
     #>
     [CmdletBinding()]
     param([Parameter(Mandatory)] [string] $SourceDir)
 
+    # Resolve python / pip executables, accepting python3 / pip3 as fallbacks
+    $pythonCmd = if (Test-ToolOnPath 'python') { 'python' }
+                 elseif (Test-ToolOnPath 'python3') { 'python3' }
+                 else { 'python' }
+    $pipCmd    = if (Test-ToolOnPath 'pip') { 'pip' }
+                 elseif (Test-ToolOnPath 'pip3') { 'pip3' }
+                 else { 'pip' }
+
     Push-Location $SourceDir
     try {
         if (Test-Path (Join-Path $SourceDir 'setup.py')) {
-            Write-Command 'python setup.py install'
-            & python setup.py install
-            if ($LASTEXITCODE -ne 0) { throw "python setup.py install failed (exit $LASTEXITCODE)" }
+            Write-Command "$pythonCmd setup.py install"
+            & $pythonCmd setup.py install
+            if ($LASTEXITCODE -ne 0) { throw "$pythonCmd setup.py install failed (exit $LASTEXITCODE)" }
+        } elseif (Test-Path (Join-Path $SourceDir 'setup.cfg')) {
+            # Modern setuptools — use pip install .
+            Write-Command "$pipCmd install ."
+            & $pipCmd install .
+            if ($LASTEXITCODE -ne 0) { throw "$pipCmd install failed (exit $LASTEXITCODE)" }
+        } elseif (Test-Path (Join-Path $SourceDir 'pyproject.toml')) {
+            Write-Command "$pipCmd install ."
+            & $pipCmd install .
+            if ($LASTEXITCODE -ne 0) { throw "$pipCmd install failed (exit $LASTEXITCODE)" }
+        } elseif (Test-Path (Join-Path $SourceDir 'requirements.txt')) {
+            Write-Command "$pipCmd install -r requirements.txt"
+            & $pipCmd install -r requirements.txt
+            if ($LASTEXITCODE -ne 0) { throw "$pipCmd install -r requirements.txt failed (exit $LASTEXITCODE)" }
         } else {
-            Write-Command 'pip install .'
-            & pip install .
-            if ($LASTEXITCODE -ne 0) { throw "pip install failed (exit $LASTEXITCODE)" }
+            # Best-effort: try pip install .
+            Write-Command "$pipCmd install ."
+            & $pipCmd install .
+            if ($LASTEXITCODE -ne 0) { throw "$pipCmd install failed (exit $LASTEXITCODE)" }
         }
     } finally {
         Pop-Location
@@ -302,6 +339,206 @@ function Invoke-MavenBuild {
     }
 }
 
+function Invoke-DotNetBuild {
+    <#
+    .SYNOPSIS Runs the .NET SDK build and publish sequence.
+    .PARAMETER SourceDir   Source root directory.
+    .PARAMETER InstallDir  Destination installation prefix.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string] $SourceDir,
+        [Parameter(Mandatory)] [string] $InstallDir
+    )
+
+    Push-Location $SourceDir
+    try {
+        Write-Command 'dotnet restore'
+        & dotnet restore
+        if ($LASTEXITCODE -ne 0) { throw "dotnet restore failed (exit $LASTEXITCODE)" }
+
+        $publishDir = [System.IO.Path]::Combine($InstallDir, 'bin')
+        Write-Command "dotnet publish -c Release -o `"$publishDir`""
+        & dotnet publish -c Release -o $publishDir
+        if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed (exit $LASTEXITCODE)" }
+
+        Write-SubItem 'Output' "→ $publishDir"
+    } finally {
+        Pop-Location
+    }
+}
+
+function Invoke-RubyBuild {
+    <#
+    .SYNOPSIS Runs the Ruby/Bundler build sequence.
+    .PARAMETER SourceDir Source root directory.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] [string] $SourceDir)
+
+    Push-Location $SourceDir
+    try {
+        Write-Command 'bundle install'
+        & bundle install
+        if ($LASTEXITCODE -ne 0) { throw "bundle install failed (exit $LASTEXITCODE)" }
+
+        # If a Rakefile exists, run rake build/install
+        if (Test-Path (Join-Path $SourceDir 'Rakefile')) {
+            Write-Command 'bundle exec rake install'
+            & bundle exec rake install
+            if ($LASTEXITCODE -ne 0) {
+                Write-WarnMsg "rake install failed; dependencies installed but no rake install target."
+            }
+        }
+    } finally {
+        Pop-Location
+    }
+}
+
+function Invoke-DenoBuild {
+    <#
+    .SYNOPSIS Runs the Deno build/compile sequence.
+    .PARAMETER SourceDir   Source root directory.
+    .PARAMETER InstallDir  Destination installation prefix.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string] $SourceDir,
+        [Parameter(Mandatory)] [string] $InstallDir
+    )
+
+    Push-Location $SourceDir
+    try {
+        # Detect entry point
+        $entryPoint = $null
+        foreach ($candidate in @('main.ts', 'main.js', 'src/main.ts', 'src/main.js', 'mod.ts', 'mod.js')) {
+            $fullPath = Join-Path $SourceDir $candidate
+            if (Test-Path $fullPath) { $entryPoint = $candidate; break }
+        }
+
+        if ($entryPoint) {
+            $binDir = [System.IO.Path]::Combine($InstallDir, 'bin')
+            if (-not (Test-Path $binDir)) { New-Item -ItemType Directory -Path $binDir -Force | Out-Null }
+            $exeName = [System.IO.Path]::GetFileNameWithoutExtension($SourceDir) + '.exe'
+            $outPath = [System.IO.Path]::Combine($binDir, $exeName)
+
+            Write-Command "deno compile --allow-all --output `"$outPath`" $entryPoint"
+            & deno compile --allow-all --output $outPath $entryPoint
+            if ($LASTEXITCODE -ne 0) { throw "deno compile failed (exit $LASTEXITCODE)" }
+            Write-SubItem 'Binary' "→ $outPath"
+        } else {
+            # No entry point found — run deno cache on all TS/JS files
+            Write-Command 'deno cache **/*.ts'
+            & deno cache (Get-ChildItem -Path $SourceDir -Filter '*.ts' -Recurse | Select-Object -First 1 -ExpandProperty FullName)
+            Write-WarnMsg "No entry point found; cached dependencies only."
+        }
+    } finally {
+        Pop-Location
+    }
+}
+
+function Invoke-ZigBuild {
+    <#
+    .SYNOPSIS Runs the Zig build sequence.
+    .PARAMETER SourceDir   Source root directory.
+    .PARAMETER InstallDir  Destination installation prefix.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string] $SourceDir,
+        [Parameter(Mandatory)] [string] $InstallDir
+    )
+
+    Push-Location $SourceDir
+    try {
+        Write-Command 'zig build -Doptimize=ReleaseSafe'
+        & zig build -Doptimize=ReleaseSafe
+        if ($LASTEXITCODE -ne 0) { throw "zig build failed (exit $LASTEXITCODE)" }
+
+        $binDir = [System.IO.Path]::Combine($InstallDir, 'bin')
+        if (-not (Test-Path $binDir)) { New-Item -ItemType Directory -Path $binDir -Force | Out-Null }
+
+        # Zig outputs to zig-out/bin by default
+        $zigOut = Join-Path $SourceDir 'zig-out\bin'
+        if (Test-Path $zigOut) {
+            Get-ChildItem -Path $zigOut -Filter '*.exe' |
+                Copy-Item -Destination $binDir -Force
+            Write-SubItem 'Binaries' "→ $binDir"
+        }
+    } finally {
+        Pop-Location
+    }
+}
+
+function Invoke-SwiftBuild {
+    <#
+    .SYNOPSIS Runs the Swift Package Manager build sequence.
+    .PARAMETER SourceDir   Source root directory.
+    .PARAMETER InstallDir  Destination installation prefix.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string] $SourceDir,
+        [Parameter(Mandatory)] [string] $InstallDir
+    )
+
+    Push-Location $SourceDir
+    try {
+        Write-Command 'swift build -c release'
+        & swift build -c release
+        if ($LASTEXITCODE -ne 0) { throw "swift build failed (exit $LASTEXITCODE)" }
+
+        $binDir = [System.IO.Path]::Combine($InstallDir, 'bin')
+        if (-not (Test-Path $binDir)) { New-Item -ItemType Directory -Path $binDir -Force | Out-Null }
+
+        $swiftRelease = Join-Path $SourceDir '.build\release'
+        if (Test-Path $swiftRelease) {
+            Get-ChildItem -Path $swiftRelease -Filter '*.exe' |
+                Copy-Item -Destination $binDir -Force
+            Write-SubItem 'Binaries' "→ $binDir"
+        }
+    } finally {
+        Pop-Location
+    }
+}
+
+function Invoke-JustBuild {
+    <#
+    .SYNOPSIS Runs the Just command runner build recipe.
+    .PARAMETER SourceDir   Source root directory.
+    .PARAMETER InstallDir  Destination installation prefix.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string] $SourceDir,
+        [Parameter(Mandatory)] [string] $InstallDir
+    )
+
+    Push-Location $SourceDir
+    try {
+        # Try common build/install recipe names in order
+        $ran = $false
+        foreach ($recipe in @('install', 'build', 'release')) {
+            $recipeList = & just --list 2>&1
+            if ($recipeList -match "\b$recipe\b") {
+                Write-Command "just $recipe"
+                & just $recipe
+                if ($LASTEXITCODE -ne 0) { throw "just $recipe failed (exit $LASTEXITCODE)" }
+                $ran = $true
+                break
+            }
+        }
+        if (-not $ran) {
+            # Default recipe
+            Write-Command 'just'
+            & just
+            if ($LASTEXITCODE -ne 0) { throw "just (default recipe) failed (exit $LASTEXITCODE)" }
+        }
+    } finally {
+        Pop-Location
+    }
+}
+
 function Add-DirectoryToSystemPath {
     <#
     .SYNOPSIS Adds a directory to the system PATH via the registry (persists across sessions).
@@ -365,7 +602,7 @@ function Invoke-SourceBuild {
 
     if (-not $bs) {
         Write-ErrorMsg ("Could not detect a supported build system in '$Repo'.`n" +
-                        "       WinGit currently supports: CMake, Make, Meson, Cargo, npm, Python, Gradle, Maven, MSBuild, Go.`n" +
+                        "       WinGit currently supports: CMake, Make, Meson, Cargo, npm, Python, Gradle, Maven, MSBuild, Go, DotNet, Ruby, Deno, Zig, Swift, Just.`n" +
                         "       You may need to build this project manually.") -ExitCode 1
     }
 
@@ -390,6 +627,12 @@ function Invoke-SourceBuild {
         'Maven'   { Invoke-MavenBuild   -SourceDir $SourceDir }
         'MSBuild' { Invoke-MSBuildBuild -SourceDir $SourceDir -InstallDir $InstallDir }
         'Go'      { Invoke-GoBuild      -SourceDir $SourceDir -InstallDir $InstallDir }
+        'DotNet'  { Invoke-DotNetBuild  -SourceDir $SourceDir -InstallDir $InstallDir }
+        'Ruby'    { Invoke-RubyBuild    -SourceDir $SourceDir }
+        'Deno'    { Invoke-DenoBuild    -SourceDir $SourceDir -InstallDir $InstallDir }
+        'Zig'     { Invoke-ZigBuild     -SourceDir $SourceDir -InstallDir $InstallDir }
+        'Swift'   { Invoke-SwiftBuild   -SourceDir $SourceDir -InstallDir $InstallDir }
+        'Just'    { Invoke-JustBuild    -SourceDir $SourceDir -InstallDir $InstallDir }
     }
 
     Write-Blank
