@@ -186,9 +186,8 @@ function Invoke-ReleaseInstall {
             $success = $true
         }
     } catch {
-        Write-ErrorMsg "Installation failed: $($_.Exception.Message)"
         Write-WarnMsg  "Downloaded file preserved at: $downloadPath"
-        exit 1
+        Write-ErrorMsg "Installation failed: $($_.Exception.Message)" -ExitCode 1
     }
 
     if (-not $success) {

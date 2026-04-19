@@ -149,11 +149,33 @@ function Write-StatusInstalled {
     Write-Host "installed $check" -ForegroundColor Green
 }
 
+function Write-ErrorLog {
+    <#
+    .SYNOPSIS Writes an error log file to the user's Documents\wingit-errors folder.
+    .PARAMETER Message The error message to record.
+    #>
+    param([Parameter(Mandatory)] [string] $Message)
+    try {
+        $docsDir  = [Environment]::GetFolderPath('MyDocuments')
+        $logDir   = [System.IO.Path]::Combine($docsDir, 'wingit-errors')
+        if (-not (Test-Path $logDir)) {
+            New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+        }
+        $timestamp = Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'
+        $logFile   = [System.IO.Path]::Combine($logDir, "wingit-error-$timestamp.log")
+        $header    = "WinGit Error Log`r`nTimestamp : $((Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))`r`n`r`n"
+        ($header + $Message) | Set-Content -Path $logFile -Encoding UTF8
+        Write-Host "  Error log saved to: $logFile" -ForegroundColor DarkGray
+    } catch {
+        # silently ignore log write failures so they don't mask the original error
+    }
+}
+
 function Write-ErrorMsg {
     <#
     .SYNOPSIS Writes a formatted error message and optionally exits.
     .PARAMETER Message The error message text.
-    .PARAMETER ExitCode If provided, calls exit with this code after printing.
+    .PARAMETER ExitCode If provided, saves an error log, pauses for input, then exits with this code.
     #>
     param(
         [Parameter(Mandatory)] [string] $Message,
@@ -161,6 +183,9 @@ function Write-ErrorMsg {
     )
     Write-Host "error: $Message" -ForegroundColor Red
     if ($ExitCode -ge 0) {
+        Write-ErrorLog -Message $Message
+        Write-Host ''
+        Read-Host 'Press Enter to close'
         exit $ExitCode
     }
 }
