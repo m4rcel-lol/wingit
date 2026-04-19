@@ -254,7 +254,7 @@ function Invoke-SourceInstall {
     Write-Phase 'Fetching' 'source...'
 
     if (Test-ToolOnPath 'git') {
-        $cloneUrl = "https://github.com/$Owner/$Repo.git"
+        $cloneUrl = "https://github.com/$Owner/${Repo}.git"
         Write-SubItem 'Cloning' "$cloneUrl  ->  $srcDir"
         Write-Trace "git clone --depth=1 $cloneUrl $srcDir"
         # Temporarily lower ErrorActionPreference so that git's informational
