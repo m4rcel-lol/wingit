@@ -53,9 +53,9 @@ jobs:
       - name: Add WiX extensions
         shell: pwsh
         run: |
-          wix extension add WixToolset.UI.wixext --global
-          wix extension add WixToolset.Bal.wixext --global
-          wix extension add WixToolset.Util.wixext --global
+          wix extension add WixToolset.UI.wixext/4.0.6 --global
+          wix extension add WixToolset.Bal.wixext/4.0.6 --global
+          wix extension add WixToolset.Util.wixext/4.0.6 --global
 
       # ── 5. MSI ───────────────────────────────────────────────────────────────
       - name: Build MSI
