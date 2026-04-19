@@ -258,8 +258,15 @@ function Invoke-SourceInstall {
         $cloneUrl = "https://github.com/$Owner/$Repo.git"
         Write-SubItem 'Cloning' "$cloneUrl  ->  $srcDir"
         Write-Trace "git clone --depth=1 $cloneUrl $srcDir"
+        # Temporarily lower ErrorActionPreference so that git's informational
+        # stderr lines (e.g. "Cloning into '...'") do not raise a
+        # NativeCommandError and terminate the script under PS 5.1.
+        $savedPref = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
         & git clone --depth=1 $cloneUrl $srcDir 2>&1 | ForEach-Object { Write-Host "  $_" }
-        if ($LASTEXITCODE -ne 0) { Write-ErrorMsg "git clone failed." -ExitCode 1 }
+        $cloneExit = $LASTEXITCODE
+        $ErrorActionPreference = $savedPref
+        if ($cloneExit -ne 0) { Write-ErrorMsg "git clone failed." -ExitCode 1 }
     } else {
         # Fallback: download zip archive. Use the repo's default branch.
         $zipUrl  = "https://github.com/$Owner/$Repo/archive/refs/heads/$DefaultBranch.zip"
