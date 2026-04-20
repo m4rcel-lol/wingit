@@ -2,12 +2,12 @@
 .SYNOPSIS
     Terminal output and formatting functions for WinGit.
 .DESCRIPTION
-    Provides rpm-ostree-style terminal output: phase headers, status lines,
+    Provides pacman-inspired terminal output: phase headers, status lines,
     progress bars, spinners, and error/warning messages. Automatically detects
     Unicode support and falls back to ASCII equivalents when needed.
 #>
 
-$script:ColumnWidth   = 12
+$script:ColumnWidth   = 14
 $script:SupportsAnsi  = ($env:WT_SESSION -or $env:TERM -eq 'xterm-256color' -or $env:TERM_PROGRAM -eq 'vscode')
 $script:SupportsUnicode = $true
 try {
@@ -35,7 +35,8 @@ function Write-Header {
     .SYNOPSIS Writes the WinGit application header banner.
     #>
     Write-Host ''
-    Write-Host 'WinGit  -- GitHub-native package manager for Windows' -ForegroundColor Cyan
+    $version = if ($script:Version) { " $script:Version" } else { '' }
+    Write-Host (":: WinGit$version - universal forge package manager for Windows") -ForegroundColor Cyan
     Write-Host ''
 }
 
@@ -49,8 +50,11 @@ function Write-Phase {
         [Parameter(Mandatory)] [string] $Label,
         [Parameter(Mandatory)] [string] $Detail
     )
-    $padded = $Label.PadRight($script:ColumnWidth)
-    Write-Host "$padded $Detail" -ForegroundColor White
+    if ($Detail) {
+        Write-Host (":: {0} {1}" -f $Label, $Detail) -ForegroundColor White
+    } else {
+        Write-Host (":: {0}" -f $Label) -ForegroundColor White
+    }
 }
 
 function Write-SubItem {
@@ -65,7 +69,7 @@ function Write-SubItem {
         [string] $Value = '',
         [System.ConsoleColor] $Color = [System.ConsoleColor]::Gray
     )
-    $padded = "  $Key".PadRight($script:ColumnWidth + 2)
+    $padded = ("   {0}" -f $Key).PadRight($script:ColumnWidth + 5)
     if ($Value) {
         Write-Host "$padded : " -NoNewline
         Write-Host $Value -ForegroundColor $Color
@@ -80,7 +84,7 @@ function Write-Action {
     .PARAMETER Message The action message.
     #>
     param([Parameter(Mandatory)] [string] $Message)
-    Write-Host "  --> $Message" -ForegroundColor Yellow
+    Write-Host (" -> {0}" -f $Message) -ForegroundColor Yellow
 }
 
 function Write-Command {
@@ -89,7 +93,7 @@ function Write-Command {
     .PARAMETER Command The command string.
     #>
     param([Parameter(Mandatory)] [string] $Command)
-    Write-Host "  `$ $Command" -ForegroundColor DarkCyan
+    Write-Host ("    `$ {0}" -f $Command) -ForegroundColor DarkCyan
 }
 
 function Write-StatusOk {
@@ -103,7 +107,7 @@ function Write-StatusOk {
         [string] $Detail = ''
     )
     $check = Get-CheckMark
-    $padded = "  $Label".PadRight($script:ColumnWidth + 2)
+    $padded = ("   {0}" -f $Label).PadRight($script:ColumnWidth + 5)
     $suffix = if ($Detail) { " ($Detail)" } else { '' }
     Write-Host "$padded : " -NoNewline
     Write-Host "$check$suffix" -ForegroundColor Green
@@ -120,7 +124,7 @@ function Write-StatusFail {
         [string] $Detail = ''
     )
     $cross = Get-CrossMark
-    $padded = "  $Label".PadRight($script:ColumnWidth + 2)
+    $padded = ("   {0}" -f $Label).PadRight($script:ColumnWidth + 5)
     $suffix = if ($Detail) { " ($Detail)" } else { '' }
     Write-Host "$padded : " -NoNewline
     Write-Host "$cross$suffix" -ForegroundColor Red
@@ -132,7 +136,7 @@ function Write-StatusNotFound {
     .PARAMETER Label The tool or step label.
     #>
     param([Parameter(Mandatory)] [string] $Label)
-    $padded = "  $Label".PadRight($script:ColumnWidth + 2)
+    $padded = ("   {0}" -f $Label).PadRight($script:ColumnWidth + 5)
     Write-Host "$padded : " -NoNewline
     Write-Host 'not found' -ForegroundColor DarkYellow
 }
@@ -144,7 +148,7 @@ function Write-StatusInstalled {
     #>
     param([Parameter(Mandatory)] [string] $Label)
     $check = Get-CheckMark
-    $padded = "  $Label".PadRight($script:ColumnWidth + 2)
+    $padded = ("   {0}" -f $Label).PadRight($script:ColumnWidth + 5)
     Write-Host "$padded : " -NoNewline
     Write-Host "installed $check" -ForegroundColor Green
 }
@@ -165,7 +169,7 @@ function Write-ErrorLog {
         $logFile   = [System.IO.Path]::Combine($logDir, "wingit-error-$timestamp.log")
         $header    = "WinGit Error Log`r`nTimestamp : $((Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))`r`n`r`n"
         ($header + $Message) | Set-Content -Path $logFile -Encoding UTF8
-        Write-Host "  Error log saved to: $logFile" -ForegroundColor DarkGray
+        Write-Host ("   log saved to: {0}" -f $logFile) -ForegroundColor DarkGray
     } catch {
         # silently ignore log write failures so they don't mask the original error
     }
@@ -243,7 +247,7 @@ function Write-ErrorMsg {
         [Parameter(Mandatory)] [string] $Message,
         [int] $ExitCode = -1
     )
-    Write-Host "error: $Message" -ForegroundColor Red
+    Write-Host ("error: {0}" -f $Message) -ForegroundColor Red
     if ($ExitCode -ge 0) {
         if (Test-InteractiveConsole) {
             Write-Host ''
@@ -259,7 +263,7 @@ function Write-WarnMsg {
     .PARAMETER Message The warning message text.
     #>
     param([Parameter(Mandatory)] [string] $Message)
-    Write-Host "warn: $Message" -ForegroundColor DarkYellow
+    Write-Host ("warning: {0}" -f $Message) -ForegroundColor DarkYellow
 }
 
 function Write-Complete {
@@ -277,12 +281,12 @@ function Write-Complete {
         [string] $VerifyCmd = ''
     )
     Write-Host ''
-    Write-Host 'Complete.' -ForegroundColor Green
+    Write-Host ':: Installation complete' -ForegroundColor Green
     $versionStr = if ($Version) { " $Version" } else { '' }
     $typeStr    = if ($InstallType -eq 'source') { ' (source build)' } else { '' }
-    Write-Host "  $Package$versionStr$typeStr is now installed." -ForegroundColor Gray
+    Write-Host ("   installed {0}{1}{2}" -f $Package, $versionStr, $typeStr) -ForegroundColor Gray
     if ($VerifyCmd) {
-        Write-Host "  Run '$VerifyCmd' to verify." -ForegroundColor Gray
+        Write-Host ("   run '{0}' to verify" -f $VerifyCmd) -ForegroundColor Gray
     }
     Write-Host ''
 }
@@ -301,7 +305,7 @@ function Write-Trace {
     #>
     param([Parameter(Mandatory)] [string] $Message)
     if ($script:VerboseMode) {
-        Write-Host "  [v] $Message" -ForegroundColor DarkGray
+        Write-Host ("   :: {0}" -f $Message) -ForegroundColor DarkGray
     }
 }
 
@@ -363,11 +367,11 @@ function Show-Spinner {
 
     while ($job.State -eq 'Running') {
         $frame = $frames[$index % $frames.Length]
-        Write-Host "`r  $frame $Message" -NoNewline
+        Write-Host "`r   $frame $Message" -NoNewline
         $index++
         Start-Sleep -Milliseconds 120
     }
-    Write-Host "`r  $(' ' * ($Message.Length + 4))`r" -NoNewline
+    Write-Host "`r   $(' ' * ($Message.Length + 4))`r" -NoNewline
 
     $result = Receive-Job -Job $job -Wait
     Remove-Job -Job $job -Force
@@ -404,7 +408,7 @@ function Write-ProgressBar {
         $speedStr = "  $(Format-Bytes $SpeedBps)/s"
     }
 
-    $line = "  [$bar]  $($pct.ToString().PadLeft(3))%$speedStr"
+    $line = "   [$bar]  $($pct.ToString().PadLeft(3))%$speedStr"
     Write-Host "`r$line" -NoNewline
     if ($pct -ge 100) { Write-Host '' }
 }
@@ -428,6 +432,6 @@ function Write-IndentedBlock {
     #>
     param([Parameter(Mandatory)] [string] $Text)
     foreach ($line in ($Text -split "`n")) {
-        Write-Host "      $($line.TrimEnd())"
+        Write-Host ("      {0}" -f $line.TrimEnd())
     }
 }

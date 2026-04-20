@@ -1,9 +1,9 @@
 <#
 .SYNOPSIS
-    WinGit — GitHub-native package manager for Windows.
+    WinGit — forge-native package manager for Windows.
 .DESCRIPTION
-    Installs software directly from GitHub repositories: downloads the latest
-    release binary when available, or clones the source and builds it locally.
+    Installs software directly from GitHub, GitLab, Gitea, Forgejo, and
+    compatible self-hosted forge instances.
 .EXAMPLE
     wingit install cli/cli
 .EXAMPLE
@@ -31,6 +31,25 @@ $ErrorActionPreference = 'Stop'
 # Also detect -v / --verbose in ExtraArgs.
 $script:VerboseMode = $v.IsPresent
 
+function Normalize-RemainingArguments {
+    param([object[]] $Arguments = @())
+
+    $normalized = [System.Collections.Generic.List[object]]::new()
+    foreach ($argument in @($Arguments)) {
+        $argumentText = [string]$argument
+        if ([string]::IsNullOrWhiteSpace($argumentText)) {
+            continue
+        }
+        $normalized.Add($argument) | Out-Null
+    }
+
+    if ($normalized.Count -gt 0) {
+        return $normalized.ToArray()
+    }
+
+    return @()
+}
+
 if ($ShowVersion) {
     $Command = '--version'
     $Target = ''
@@ -41,6 +60,8 @@ elseif ($ShowHelp) {
     $Target = ''
     $ExtraArgs = @()
 }
+
+$ExtraArgs = Normalize-RemainingArguments -Arguments $ExtraArgs
 
 if ($ExtraArgs -and $ExtraArgs.Count -gt 0) {
     $filteredArgs = [System.Collections.Generic.List[object]]::new()
@@ -87,7 +108,7 @@ $libDir = [System.IO.Path]::Combine($PSScriptRoot, 'lib')
 . "$libDir\elevation.ps1"
 
 # ── Version ─────────────────────────────────────────────────────────────────
-$script:Version = '2.1.0'
+$script:Version = '3.0.0'
 $script:PreferredArchitecture = ''
 $script:IncludePrerelease = $false
 $script:ForceSourceInstall = $false
@@ -99,13 +120,100 @@ try {
 } catch {}
 
 # ── Helper: parse owner/repo ─────────────────────────────────────────────────
-function Resolve-OwnerRepo {
-    param([Parameter(Mandatory)] [string] $PackageTarget)
+function Test-LooksLikeHost {
+    param([Parameter(Mandatory)] [string] $Value)
 
-    if ($PackageTarget -match '^([A-Za-z0-9_.\-]+)/([A-Za-z0-9_.\-]+)$') {
-        return @{ Owner = $Matches[1]; Repo = $Matches[2] }
+    return ($Value -match '[\.:]' -or $Value -eq 'localhost')
+}
+
+function Get-PackageStorageName {
+    param(
+        [string] $Provider = 'github',
+        [string] $ForgeHost = '',
+        [Parameter(Mandatory)] [string] $Owner,
+        [Parameter(Mandatory)] [string] $Repo
+    )
+
+    $rawName = "$(Get-NormalizedForgeProvider -Provider $Provider)-$(Get-NormalizedForgeHost -Provider $Provider -ForgeHost $ForgeHost)-$Owner-$Repo"
+    $safeName = $rawName -replace '[\\/:*?"<>|\s]+', '-'
+    $safeName = $safeName -replace '-{2,}', '-'
+    return $safeName.Trim('-').ToLower()
+}
+
+function Resolve-OwnerRepo {
+    param(
+        [Parameter(Mandatory)] [string] $PackageTarget,
+        [object[]] $Arguments = @()
+    )
+
+    $remainingArguments = @(Normalize-RemainingArguments -Arguments $Arguments)
+    $provider = 'github'
+    $locator = $PackageTarget.Trim()
+
+    if ($PackageTarget -and $PackageTarget.Trim().ToLower() -in (Get-SupportedForgeProviders)) {
+        $provider = Get-NormalizedForgeProvider -Provider $PackageTarget.Trim().ToLower()
+        if ($remainingArguments.Count -eq 0) {
+            Write-ErrorMsg "Missing repository target after provider '$provider'." -ExitCode 1
+        }
+        $locator = ([string]$remainingArguments[0]).Trim()
+        $remainingArguments = if ($remainingArguments.Count -gt 1) { $remainingArguments[1..($remainingArguments.Count-1)] } else { @() }
     }
-    Write-ErrorMsg "Invalid target format '$PackageTarget'. Expected: <owner>/<repo>" -ExitCode 1
+
+    $locator = $locator.TrimEnd('/')
+    $forgeHost = ''
+    $owner = ''
+    $repo = ''
+
+    if ($locator -match '^https?://') {
+        try {
+            $uri = [System.Uri]$locator
+        } catch {
+            Write-ErrorMsg "Invalid repository URL '$locator'." -ExitCode 1
+        }
+
+        $forgeHost = $uri.Host
+        $segments = @($uri.AbsolutePath.Trim('/') -split '/' | Where-Object { $_ })
+        if ($segments.Count -lt 2) {
+            Write-ErrorMsg "Invalid repository URL '$locator'. Expected a path like /owner/repo." -ExitCode 1
+        }
+
+        $repo = $segments[-1] -replace '\.git$',''
+        $owner = ($segments[0..($segments.Count - 2)] -join '/')
+    } else {
+        $segments = @($locator -split '/' | Where-Object { $_ })
+        if ($provider -eq 'github' -and $segments.Count -eq 2) {
+            $forgeHost = Get-ProviderDefaultHost -Provider $provider
+            $owner = $segments[0]
+            $repo = ($segments[1] -replace '\.git$','')
+        } elseif ($segments.Count -ge 3 -and (Test-LooksLikeHost -Value $segments[0])) {
+            $forgeHost = $segments[0]
+            $repo = ($segments[-1] -replace '\.git$','')
+            $owner = ($segments[1..($segments.Count - 2)] -join '/')
+        } elseif (($provider -eq 'gitlab' -or $provider -eq 'forgejo') -and $segments.Count -ge 2) {
+            $forgeHost = Get-ProviderDefaultHost -Provider $provider
+            $repo = ($segments[-1] -replace '\.git$','')
+            $owner = ($segments[0..($segments.Count - 2)] -join '/')
+        } else {
+            Write-ErrorMsg "Invalid target format '$PackageTarget'. Expected: <owner>/<repo>, a repository URL, or '<provider> <host>/<owner>/<repo>'." -ExitCode 1
+        }
+    }
+
+    if (-not $owner -or -not $repo) {
+        Write-ErrorMsg "Invalid repository target '$PackageTarget'." -ExitCode 1
+    }
+
+    $forgeHost = Get-NormalizedForgeHost -Provider $provider -ForgeHost $forgeHost
+    return [PSCustomObject]@{
+        Provider          = $provider
+        Host              = $forgeHost
+        Owner             = $owner
+        Repo              = $repo
+        RemainingArguments = @($remainingArguments)
+        DisplayName       = (Format-PackageReference -Provider $provider -ForgeHost $forgeHost -Owner $owner -Repo $repo)
+        WebUrl            = (Get-RepoWebUrl -Provider $provider -ForgeHost $forgeHost -Owner $owner -Repo $repo)
+        CloneUrl          = (Get-RepoCloneUrl -Provider $provider -ForgeHost $forgeHost -Owner $owner -Repo $repo)
+        StorageName       = (Get-PackageStorageName -Provider $provider -ForgeHost $forgeHost -Owner $owner -Repo $repo)
+    }
 }
 
 function Resolve-InstallPreferences {
@@ -198,12 +306,14 @@ function Resolve-ReleaseArchitecturePreference {
 
 function Remove-StalePackagePathEntries {
     param(
+        [string] $Provider = 'github',
+        [string] $ForgeHost = '',
         [Parameter(Mandatory)] [string] $Owner,
         [Parameter(Mandatory)] [string] $Repo,
         [string[]] $CurrentPathEntries = @()
     )
 
-    $existingEntry = Get-RegistryEntry -Owner $Owner -Repo $Repo
+    $existingEntry = Get-RegistryEntry -Provider $Provider -ForgeHost $ForgeHost -Owner $Owner -Repo $Repo
     if (-not $existingEntry) { return }
 
     $currentLookup = @{}
@@ -219,6 +329,163 @@ function Remove-StalePackagePathEntries {
     }
 }
 
+function Get-WinGitTempRoot {
+    return [System.IO.Path]::Combine($env:TEMP, 'wingit')
+}
+
+function Get-WinGitErrorLogDirectory {
+    $documentsDir = [Environment]::GetFolderPath('MyDocuments')
+    return [System.IO.Path]::Combine($documentsDir, 'wingit-errors')
+}
+
+function Get-PackageInstallExpectation {
+    param([Parameter(Mandatory)] [object] $Entry)
+
+    if ($Entry.install_type -eq 'source') {
+        return 'managed'
+    }
+
+    $assetName = if ($Entry.asset_name) { ([string]$Entry.asset_name).ToLower() } else { '' }
+    if ($assetName.EndsWith('.msi') -or $assetName.EndsWith('.exe')) {
+        return 'external'
+    }
+
+    return 'managed'
+}
+
+function Get-PackageVerificationReport {
+    param([Parameter(Mandatory)] [object] $Entry)
+
+    $package = Format-PackageReference -Provider (Get-EntryProvider -Entry $Entry) -ForgeHost (Get-EntryHost -Entry $Entry) -Owner $Entry.owner -Repo $Entry.repo
+    $installExpectation = Get-PackageInstallExpectation -Entry $Entry
+    $installPath = if ($Entry.install_path) { [string]$Entry.install_path } else { '' }
+    $installExists = [bool]($installPath -and (Test-Path $installPath))
+    $issues = [System.Collections.Generic.List[string]]::new()
+    $pathReports = @()
+
+    if ($installExpectation -eq 'managed' -and -not $installExists) {
+        if ($installPath) {
+            $issues.Add("Install path missing: $installPath")
+        } else {
+            $issues.Add('Install path missing from registry.')
+        }
+    }
+
+    foreach ($pathEntry in @(Get-PackagePathEntries -Entry $Entry)) {
+        $exists = [bool](Test-Path $pathEntry)
+        $onPath = [bool]($exists -and (Test-DirectoryInSystemPath -Directory $pathEntry))
+        $pathReports += [PSCustomObject]@{
+            path    = $pathEntry
+            exists  = $exists
+            on_path = $onPath
+        }
+
+        if (-not $exists) {
+            $issues.Add("PATH entry missing on disk: $pathEntry")
+        } elseif (-not $onPath) {
+            $issues.Add("PATH entry not registered: $pathEntry")
+        }
+    }
+
+    $binaryCount = 0
+    if ($installExists) {
+        $binaryCount = @(Get-ChildItem -Path $installPath -Filter '*.exe' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 200).Count
+    }
+
+    return [PSCustomObject]@{
+        package             = $package
+        install_expectation = $installExpectation
+        install_path        = $installPath
+        install_exists      = $installExists
+        path_reports        = @($pathReports)
+        binary_count        = $binaryCount
+        issues              = @($issues)
+        healthy             = ($issues.Count -eq 0)
+    }
+}
+
+function Write-PackageVerificationReport {
+    param([Parameter(Mandatory)] [object] $Report)
+
+    Write-Phase 'Verifying' "$($Report.package)..."
+
+    if ($Report.install_expectation -eq 'external' -and -not $Report.install_exists) {
+        Write-SubItem 'Install path' 'managed by external installer'
+    } elseif ($Report.install_exists) {
+        Write-SubItem 'Install path' $Report.install_path
+        Write-SubItem 'Binaries' $Report.binary_count
+    } else {
+        Write-StatusFail -Label 'install path' -Detail $Report.install_path
+    }
+
+    foreach ($pathReport in $Report.path_reports) {
+        $status = if ($pathReport.exists) {
+            if ($pathReport.on_path) { 'present' } else { 'missing from PATH' }
+        } else {
+            'missing on disk'
+        }
+        Write-SubItem 'PATH entry' "$($pathReport.path)  [$status]"
+    }
+
+    if ($Report.healthy) {
+        Write-StatusOk -Label 'health' -Detail 'healthy'
+    } else {
+        foreach ($issue in $Report.issues) {
+            Write-WarnMsg $issue
+        }
+        Write-StatusFail -Label 'health' -Detail 'issues found'
+    }
+
+    Write-Blank
+}
+
+function Repair-PackageEntry {
+    param([Parameter(Mandatory)] [object] $Entry)
+
+    $report = Get-PackageVerificationReport -Entry $Entry
+    Write-Phase 'Repairing' "$($report.package)..."
+
+    if ($report.install_expectation -eq 'managed' -and -not $report.install_exists) {
+        Write-WarnMsg 'Managed install path is missing; run update or install again to restore it.'
+        Write-Blank
+        return 'failed'
+    }
+
+    $changes = 0
+    $warnings = 0
+    foreach ($pathReport in $report.path_reports) {
+        if (-not $pathReport.exists) {
+            Write-WarnMsg "Cannot repair missing directory: $($pathReport.path)"
+            $warnings++
+            continue
+        }
+
+        if ($pathReport.on_path) {
+            Write-SubItem 'PATH' "$($pathReport.path) already registered"
+            continue
+        }
+
+        Add-DirectoryToSystemPath -Directory $pathReport.path | Out-Null
+        $changes++
+    }
+
+    if ($changes -gt 0) {
+        Write-StatusOk -Label 'repair' -Detail "$changes change(s) applied"
+        Write-Blank
+        return 'repaired'
+    }
+
+    if ($warnings -gt 0) {
+        Write-StatusFail -Label 'repair' -Detail 'manual action required'
+        Write-Blank
+        return 'failed'
+    }
+
+    Write-StatusOk -Label 'repair' -Detail 'nothing to fix'
+    Write-Blank
+    return 'ok'
+}
+
 # ── Subcommand: install ───────────────────────────────────────────────────────
 function Invoke-Install {
     param(
@@ -226,10 +493,12 @@ function Invoke-Install {
         [object[]] $Arguments = @()
     )
 
-    $parsed = Resolve-OwnerRepo -PackageTarget $PackageTarget
+    $parsed = Resolve-OwnerRepo -PackageTarget $PackageTarget -Arguments $Arguments
+    $provider = $parsed.Provider
+    $forgeHost   = $parsed.Host
     $owner  = $parsed.Owner
     $repo   = $parsed.Repo
-    $null   = Resolve-InstallPreferences -Arguments $Arguments
+    $null   = Resolve-InstallPreferences -Arguments $parsed.RemainingArguments
     $releaseArchitecture = Resolve-ReleaseArchitecturePreference -RequestedArchitecture $script:PreferredArchitecture
     if ($releaseArchitecture.ReleaseEligible) {
         $script:PreferredArchitecture = $releaseArchitecture.Architecture
@@ -239,18 +508,19 @@ function Invoke-Install {
     Write-Header
 
     # ── Phase 1: Repository validation ──────────────────────────────────────
-    Write-Phase 'Resolving' "$owner/$repo..."
-    Write-Trace "GET https://api.github.com/repos/$owner/$repo"
+    Write-Phase 'resolving' $parsed.DisplayName
+    Write-Trace "provider=$provider host=$forgeHost"
 
-    $repoInfo = Get-RepoInfo -Owner $owner -Repo $repo
+    $repoInfo = Get-RepoInfo -Provider $provider -ForgeHost $forgeHost -Owner $owner -Repo $repo
     if (-not $repoInfo) {
-        Write-ErrorMsg "Repository '$owner/$repo' not found on GitHub." -ExitCode 1
+        Write-ErrorMsg "Repository '$($parsed.DisplayName)' was not found on $forgeHost." -ExitCode 1
     }
 
     $stars    = if ($repoInfo.stargazers_count) { '{0:N0}' -f $repoInfo.stargazers_count } else { '0' }
     $language = if ($repoInfo.language)         { $repoInfo.language }                     else { 'Unknown' }
 
-    Write-SubItem 'Repository' "https://github.com/$owner/$repo"
+    Write-SubItem 'Repository' $parsed.WebUrl
+    Write-SubItem 'Forge'      "$provider  ($forgeHost)"
     Write-SubItem 'Stars'      $stars
     Write-SubItem 'Language'   $language
     if ($repoInfo.description) {
@@ -264,7 +534,7 @@ function Invoke-Install {
         Write-Blank
         Assert-Elevation -ScriptPath $PSCommandPath -Arguments $elevationArgs
         try {
-            Invoke-SourceInstall -Owner $owner -Repo $repo -DefaultBranch $repoInfo.default_branch
+            Invoke-SourceInstall -Provider $provider -ForgeHost $forgeHost -Owner $owner -Repo $repo -DefaultBranch $repoInfo.default_branch
         } catch {
             Write-ErrorMsg $_.Exception.Message -ExitCode 1
         }
@@ -272,7 +542,7 @@ function Invoke-Install {
     }
 
     # ── Phase 1b: Release detection ─────────────────────────────────────────
-    Write-Phase 'Checking' 'releases...'
+    Write-Phase 'checking' 'releases...'
     if ($releaseArchitecture.AutoDetected) {
         Write-SubItem 'Architecture' "$($releaseArchitecture.DisplayLabel) (auto-detected)"
     } else {
@@ -284,16 +554,16 @@ function Invoke-Install {
         Write-Blank
         Assert-Elevation -ScriptPath $PSCommandPath -Arguments $elevationArgs
         try {
-            Invoke-SourceInstall -Owner $owner -Repo $repo -DefaultBranch $repoInfo.default_branch
+            Invoke-SourceInstall -Provider $provider -ForgeHost $forgeHost -Owner $owner -Repo $repo -DefaultBranch $repoInfo.default_branch -DisplayName $parsed.DisplayName -StorageName $parsed.StorageName
         } catch {
             Write-ErrorMsg $_.Exception.Message -ExitCode 1
         }
         return
     }
 
-    Write-Trace "GET https://api.github.com/repos/$owner/$repo/releases/latest"
+    Write-Trace "fetching latest release metadata"
 
-    $release    = Get-LatestRelease -Owner $owner -Repo $repo -IncludePrerelease:$script:IncludePrerelease
+    $release    = Get-LatestRelease -Provider $provider -ForgeHost $forgeHost -Owner $owner -Repo $repo -IncludePrerelease:$script:IncludePrerelease
     $assetToUse = $null
 
     if ($release -and $release.assets -and $release.assets.Count -gt 0) {
@@ -310,7 +580,7 @@ function Invoke-Install {
 
         Assert-Elevation -ScriptPath $PSCommandPath -Arguments $elevationArgs
         try {
-            Invoke-ReleaseInstall -Owner $owner -Repo $repo -Release $release -Asset $assetToUse
+            Invoke-ReleaseInstall -Provider $provider -ForgeHost $forgeHost -Owner $owner -Repo $repo -Release $release -Asset $assetToUse -DisplayName $parsed.DisplayName -StorageName $parsed.StorageName
         } catch {
             Write-ErrorMsg $_.Exception.Message -ExitCode 1
         }
@@ -325,7 +595,7 @@ function Invoke-Install {
 
         Assert-Elevation -ScriptPath $PSCommandPath -Arguments $elevationArgs
         try {
-            Invoke-SourceInstall -Owner $owner -Repo $repo -DefaultBranch $repoInfo.default_branch
+            Invoke-SourceInstall -Provider $provider -ForgeHost $forgeHost -Owner $owner -Repo $repo -DefaultBranch $repoInfo.default_branch -DisplayName $parsed.DisplayName -StorageName $parsed.StorageName
         } catch {
             Write-ErrorMsg $_.Exception.Message -ExitCode 1
         }
@@ -335,15 +605,26 @@ function Invoke-Install {
 # ── Release install flow ──────────────────────────────────────────────────────
 function Invoke-ReleaseInstall {
     param(
+        [string] $Provider = 'github',
+        [string] $ForgeHost = '',
         [string] $Owner,
         [string] $Repo,
         [object] $Release,
-        [object] $Asset
+        [object] $Asset,
+        [string] $DisplayName = '',
+        [string] $StorageName = ''
     )
 
-    $downloadDir  = [System.IO.Path]::Combine($env:TEMP, 'wingit', $Repo)
+    if (-not $DisplayName) {
+        $DisplayName = Format-PackageReference -Provider $Provider -ForgeHost $ForgeHost -Owner $Owner -Repo $Repo
+    }
+    if (-not $StorageName) {
+        $StorageName = Get-PackageStorageName -Provider $Provider -ForgeHost $ForgeHost -Owner $Owner -Repo $Repo
+    }
+
+    $downloadDir  = [System.IO.Path]::Combine($env:TEMP, 'wingit', $StorageName)
     $downloadPath = [System.IO.Path]::Combine($downloadDir, $Asset.name)
-    $installDir = [System.IO.Path]::Combine($env:PROGRAMFILES, 'WinGit', 'packages', "$Owner-$Repo")
+    $installDir = [System.IO.Path]::Combine($env:PROGRAMFILES, 'WinGit', 'packages', $StorageName)
 
     $ext     = $Asset.name.ToLower()
     $success = $false
@@ -351,13 +632,13 @@ function Invoke-ReleaseInstall {
     $pathEntries = @()
 
     try {
-        Write-Phase 'Downloading' $Asset.name
+        Write-Phase 'downloading' $Asset.name
         Write-Trace "URL: $($Asset.browser_download_url)"
         Write-Trace "Destination: $downloadPath"
         Invoke-Download -Url $Asset.browser_download_url -Destination $downloadPath
         Write-Blank
 
-        Write-Phase 'Installing' $Asset.name
+        Write-Phase 'installing' $Asset.name
         Write-Trace "Install directory: $installDir"
 
         if ($ext.EndsWith('.msi')) {
@@ -418,9 +699,10 @@ function Invoke-ReleaseInstall {
             Remove-Item -Path $installDir -Recurse -Force -ErrorAction SilentlyContinue
         }
         Write-WarnMsg  "Downloaded file preserved at: $downloadPath"
-        Write-InstallFailureLog -Operation 'release install' -Package "$Owner/$Repo" `
+        Write-InstallFailureLog -Operation 'release install' -Package $DisplayName `
             -Message 'Installing a release asset failed.' `
             -Details @(
+                "Forge     : $Provider ($ForgeHost)",
                 "Asset     : $($Asset.name)",
                 "Release   : $($Release.tag_name)",
                 "URL       : $($Asset.browser_download_url)",
@@ -432,9 +714,10 @@ function Invoke-ReleaseInstall {
     }
 
     if (-not $success) {
-        Write-InstallFailureLog -Operation 'release install' -Package "$Owner/$Repo" `
+        Write-InstallFailureLog -Operation 'release install' -Package $DisplayName `
             -Message 'Installer did not report success.' `
             -Details @(
+                "Forge     : $Provider ($ForgeHost)",
                 "Asset     : $($Asset.name)",
                 "Release   : $($Release.tag_name)",
                 "URL       : $($Asset.browser_download_url)",
@@ -444,10 +727,10 @@ function Invoke-ReleaseInstall {
         throw 'Installation failed.'
     }
 
-    Remove-StalePackagePathEntries -Owner $Owner -Repo $Repo -CurrentPathEntries $pathEntries
+    Remove-StalePackagePathEntries -Provider $Provider -ForgeHost $ForgeHost -Owner $Owner -Repo $Repo -CurrentPathEntries $pathEntries
 
     # Record in registry
-    Add-RegistryEntry -Owner $Owner -Repo $Repo `
+    Add-RegistryEntry -Provider $Provider -ForgeHost $ForgeHost -Owner $Owner -Repo $Repo `
         -Version $Release.tag_name -InstallType 'release' `
         -InstallPath $installDir -AssetName $Asset.name `
         -Architecture $script:PreferredArchitecture `
@@ -457,23 +740,34 @@ function Invoke-ReleaseInstall {
     # Cleanup temp files
     Remove-Item -Path $downloadPath -Force -ErrorAction SilentlyContinue
 
-    Write-Complete -Package "$Owner/$Repo" -Version $Release.tag_name -InstallType 'release'
+    Write-Complete -Package $DisplayName -Version $Release.tag_name -InstallType 'release'
 }
 
 # ── Source build flow ─────────────────────────────────────────────────────────
 function Invoke-SourceInstall {
     param(
+        [string] $Provider = 'github',
+        [string] $ForgeHost = '',
         [string] $Owner,
         [string] $Repo,
-        [string] $DefaultBranch = 'main'
+        [string] $DefaultBranch = 'main',
+        [string] $DisplayName = '',
+        [string] $StorageName = ''
     )
 
-    $workRoot   = [System.IO.Path]::Combine($env:TEMP, 'wingit', "$Owner-$Repo-source")
+    if (-not $DisplayName) {
+        $DisplayName = Format-PackageReference -Provider $Provider -ForgeHost $ForgeHost -Owner $Owner -Repo $Repo
+    }
+    if (-not $StorageName) {
+        $StorageName = Get-PackageStorageName -Provider $Provider -ForgeHost $ForgeHost -Owner $Owner -Repo $Repo
+    }
+
+    $workRoot   = [System.IO.Path]::Combine($env:TEMP, 'wingit', "$StorageName-source")
     $srcDir     = [System.IO.Path]::Combine($workRoot, 'src')
     $extractTemp = [System.IO.Path]::Combine($workRoot, 'extract')
     $zipPath    = [System.IO.Path]::Combine($workRoot, "$Repo-src.zip")
-    $installDir = [System.IO.Path]::Combine($env:PROGRAMFILES, 'WinGit', 'packages', "$Owner-$Repo")
-    $cloneUrl   = "https://github.com/$Owner/${Repo}.git"
+    $installDir = [System.IO.Path]::Combine($env:PROGRAMFILES, 'WinGit', 'packages', $StorageName)
+    $cloneUrl   = Get-RepoCloneUrl -Provider $Provider -ForgeHost $ForgeHost -Owner $Owner -Repo $Repo
     $activeSourceUrl = $cloneUrl
 
     if (Test-Path $workRoot) {
@@ -484,7 +778,7 @@ function Invoke-SourceInstall {
     New-Item -ItemType Directory -Path $workRoot -Force | Out-Null
 
     try {
-        Write-Phase 'Fetching' 'source...'
+        Write-Phase 'retrieving' 'source...'
 
         try {
             if (Test-ToolOnPath 'git') {
@@ -499,14 +793,14 @@ function Invoke-SourceInstall {
                 }
             } else {
                 # Fallback: download zip archive. Use the repo's default branch.
-                $activeSourceUrl = "https://github.com/$Owner/$Repo/archive/refs/heads/$DefaultBranch.zip"
+                $activeSourceUrl = Get-RepoArchiveUrl -Provider $Provider -ForgeHost $ForgeHost -Owner $Owner -Repo $Repo -Ref $DefaultBranch
                 Write-SubItem 'Downloading' $activeSourceUrl
                 Write-Trace "Destination: $zipPath"
                 try {
                     Invoke-Download -Url $activeSourceUrl -Destination $zipPath
                 } catch {
                     $fallbackBranch = if ($DefaultBranch -eq 'main') { 'master' } else { 'main' }
-                    $activeSourceUrl = "https://github.com/$Owner/$Repo/archive/refs/heads/$fallbackBranch.zip"
+                    $activeSourceUrl = Get-RepoArchiveUrl -Provider $Provider -ForgeHost $ForgeHost -Owner $Owner -Repo $Repo -Ref $fallbackBranch
                     Write-SubItem 'Retrying' $activeSourceUrl
                     Invoke-Download -Url $activeSourceUrl -Destination $zipPath
                 }
@@ -532,9 +826,10 @@ function Invoke-SourceInstall {
                 Remove-Item -Path $srcDir -Recurse -Force -ErrorAction SilentlyContinue
             }
 
-            Write-InstallFailureLog -Operation 'source fetch' -Package "$Owner/$Repo" `
+            Write-InstallFailureLog -Operation 'source fetch' -Package $DisplayName `
                 -Message 'Fetching source code failed.' `
                 -Details @(
+                    "Forge     : $Provider ($ForgeHost)",
                     "Source    : $activeSourceUrl",
                     "Workspace : $workRoot",
                     "SourceDir : $srcDir",
@@ -556,9 +851,10 @@ function Invoke-SourceInstall {
                 Remove-Item -Path $installDir -Recurse -Force -ErrorAction SilentlyContinue
             }
 
-            Write-InstallFailureLog -Operation 'source build' -Package "$Owner/$Repo" `
+            Write-InstallFailureLog -Operation 'source build' -Package $DisplayName `
                 -Message 'Building from source failed.' `
                 -Details @(
+                    "Forge     : $Provider ($ForgeHost)",
                     "SourceDir : $srcDir",
                     "Install   : $installDir"
                 ) `
@@ -566,16 +862,16 @@ function Invoke-SourceInstall {
             throw "Source build failed: $($_.Exception.Message)"
         }
 
-        Remove-StalePackagePathEntries -Owner $Owner -Repo $Repo -CurrentPathEntries $pathEntries
+        Remove-StalePackagePathEntries -Provider $Provider -ForgeHost $ForgeHost -Owner $Owner -Repo $Repo -CurrentPathEntries $pathEntries
 
-        Add-RegistryEntry -Owner $Owner -Repo $Repo `
+        Add-RegistryEntry -Provider $Provider -ForgeHost $ForgeHost -Owner $Owner -Repo $Repo `
             -Version 'source' -InstallType 'source' `
             -InstallPath $installDir `
             -Architecture $script:PreferredArchitecture `
             -IncludePrerelease $script:IncludePrerelease `
             -PathEntries $pathEntries
 
-        Write-Complete -Package "$Owner/$Repo" -InstallType 'source'
+        Write-Complete -Package $DisplayName -InstallType 'source'
     } finally {
         if (Test-Path $workRoot) {
             Remove-Item -Path $workRoot -Recurse -Force -ErrorAction SilentlyContinue
@@ -585,7 +881,10 @@ function Invoke-SourceInstall {
 
 # ── Subcommand: update ────────────────────────────────────────────────────────
 function Invoke-Update {
-    param([string] $PackageTarget)
+    param(
+        [string] $PackageTarget,
+        [object[]] $Arguments = @()
+    )
 
     Write-Header
 
@@ -606,7 +905,7 @@ function Invoke-Update {
         $pinned = 0
 
         foreach ($entry in $entries) {
-            $pkg = "$($entry.owner)/$($entry.repo)"
+            $pkg = Format-PackageReference -Provider (Get-EntryProvider -Entry $entry) -ForgeHost (Get-EntryHost -Entry $entry) -Owner $entry.owner -Repo $entry.repo
             Write-Phase 'Checking' "$pkg..."
             if ($entry.PSObject.Properties.Name -contains 'pinned' -and $entry.pinned) {
                 Write-SubItem 'Pinned' 'skipping during update --all'
@@ -615,6 +914,7 @@ function Invoke-Update {
                 continue
             }
             $result = Update-SinglePackage -Owner $entry.owner -Repo $entry.repo `
+                -Provider (Get-EntryProvider -Entry $entry) -ForgeHost (Get-EntryHost -Entry $entry) `
                 -CurrentVersion $entry.version -InstallType $entry.install_type `
                 -Architecture $entry.architecture -IncludePrerelease ([bool]$entry.include_prerelease)
             switch ($result) {
@@ -635,25 +935,25 @@ function Invoke-Update {
     }
 
     if (-not $PackageTarget) {
-        Write-ErrorMsg "Missing target. Usage: wingit update <owner>/<repo>  or  wingit update --all" -ExitCode 1
+        Write-ErrorMsg "Missing target. Usage: wingit update <owner>/<repo>  or  wingit update <provider> <target>  or  wingit update --all" -ExitCode 1
     }
 
-    $parsed = Resolve-OwnerRepo -PackageTarget $PackageTarget
-    Write-Phase 'Updating' "$($parsed.Owner)/$($parsed.Repo)..."
+    $parsed = Resolve-OwnerRepo -PackageTarget $PackageTarget -Arguments $Arguments
+    Write-Phase 'Updating' $parsed.DisplayName
 
-    $entry = Read-Registry | Where-Object { $_.owner -eq $parsed.Owner -and $_.repo -eq $parsed.Repo } | Select-Object -First 1
+    $entry = Get-RegistryEntry -Provider $parsed.Provider -ForgeHost $parsed.Host -Owner $parsed.Owner -Repo $parsed.Repo
     $currentVersion = if ($entry) { $entry.version } else { $null }
     $installType    = if ($entry) { $entry.install_type } else { $null }
 
     if (-not $entry) {
-        Write-WarnMsg "'$PackageTarget' is not in the WinGit registry. Running fresh install..."
+        Write-WarnMsg "'$($parsed.DisplayName)' is not in the WinGit registry. Running fresh install..."
         Write-Blank
     } elseif ($entry.PSObject.Properties.Name -contains 'pinned' -and $entry.pinned) {
         Write-SubItem 'Pinned' 'manual update requested; continuing'
     }
 
-    Assert-Elevation -ScriptPath $PSCommandPath -Arguments @('update', $PackageTarget)
-    $result = Update-SinglePackage -Owner $parsed.Owner -Repo $parsed.Repo `
+    Assert-Elevation -ScriptPath $PSCommandPath -Arguments (@('update', $PackageTarget) + @($Arguments | ForEach-Object { [string]$_ }))
+    $result = Update-SinglePackage -Provider $parsed.Provider -ForgeHost $parsed.Host -Owner $parsed.Owner -Repo $parsed.Repo `
         -CurrentVersion $currentVersion -InstallType $installType `
         -Architecture $entry.architecture -IncludePrerelease ([bool]$entry.include_prerelease)
     if ($result -eq 'uptodate') {
@@ -665,14 +965,45 @@ function Invoke-Update {
 
 # ── Subcommand: search ───────────────────────────────────────────────────────
 function Invoke-Search {
-    param([Parameter(Mandatory)] [string] $Query)
+    param(
+        [Parameter(Mandatory)] [string] $Query,
+        [object[]] $Arguments = @()
+    )
+
+    $provider = 'github'
+    $searchHost = ''
+    $queryParts = @($Query)
+    $remaining = @(Normalize-RemainingArguments -Arguments $Arguments)
+
+    if ($Query.ToLower() -in (Get-SupportedForgeProviders)) {
+        $provider = Get-NormalizedForgeProvider -Provider $Query
+        if ($remaining.Count -eq 0) {
+            Write-ErrorMsg "Missing query. Usage: wingit search [provider] [host] <query>" -ExitCode 1
+        }
+
+        if ($remaining.Count -gt 1 -and (Test-LooksLikeHost -Value ([string]$remaining[0]))) {
+            $searchHost = [string]$remaining[0]
+            $queryParts = @($remaining[1..($remaining.Count - 1)])
+        } else {
+            $queryParts = @($remaining)
+        }
+    } elseif ($remaining -and $remaining.Count -gt 0) {
+        $queryParts = @($Query) + @($remaining | ForEach-Object { [string]$_ })
+    }
+
+    $queryText = @($queryParts | Where-Object { $_ }) -join ' '
+    if (-not $queryText) {
+        Write-ErrorMsg "Missing query. Usage: wingit search [provider] [host] <query>" -ExitCode 1
+    }
 
     Write-Header
-    Write-Phase 'Searching' "GitHub repositories for '$Query'..."
+    $resolvedHost = if ($searchHost) { Get-NormalizedForgeHost -Provider $provider -ForgeHost $searchHost } else { Get-NormalizedForgeHost -Provider $provider }
+    Write-Phase 'searching' "$provider repositories for '$queryText'..."
+    Write-SubItem 'Forge' "$provider  ($resolvedHost)"
     Write-Blank
-    Write-Trace "GET https://api.github.com/search/repositories?q=$( [System.Uri]::EscapeDataString($Query) )"
+    Write-Trace "search provider=$provider host=$resolvedHost query=$queryText"
 
-    $results = Search-GitHubRepositories -Query $Query -Limit 10
+    $results = Search-ForgeRepositories -Provider $provider -ForgeHost $resolvedHost -Query $queryText -Limit 10
     if (-not $results -or $results.Count -eq 0) {
         Write-Host 'No repositories found.' -ForegroundColor DarkGray
         Write-Blank
@@ -681,7 +1012,7 @@ function Invoke-Search {
 
     $index = 1
     foreach ($repo in $results) {
-        $name = "$($repo.owner.login)/$($repo.name)"
+        $name = Format-PackageReference -Provider $repo.provider -ForgeHost $repo.host -Owner $repo.owner.login -Repo $repo.name
         $stars = '{0:N0}' -f [int]$repo.stargazers_count
         $lang = if ($repo.language) { $repo.language } else { 'Unknown' }
 
@@ -699,6 +1030,18 @@ function Invoke-Search {
 function Invoke-Doctor {
     Write-Header
     Write-Phase 'Doctor' 'environment diagnostics'
+    Write-Blank
+
+    $releaseArchitecture = Get-SystemReleaseArchitecture
+    $installedCount = @(Read-Registry).Count
+
+    Write-Host '  WinGit:' -ForegroundColor Cyan
+    Write-SubItem 'Version' $script:Version
+    Write-SubItem 'Release arch' $(if ($releaseArchitecture) { $releaseArchitecture } else { 'source-only fallback' })
+    Write-SubItem 'Registry' (Get-RegistryPath)
+    Write-SubItem 'Workspace' (Get-WinGitTempRoot)
+    Write-SubItem 'Installed' $installedCount
+    Write-SubItem 'Providers' ((Get-SupportedForgeProviders) -join ', ')
     Write-Blank
 
     Write-Host '  Core tools:' -ForegroundColor Cyan
@@ -721,12 +1064,30 @@ function Invoke-Doctor {
     }
     Write-Blank
 
-    Write-Host '  GitHub API:' -ForegroundColor Cyan
+    Write-Host '  Forge auth:' -ForegroundColor Cyan
     if ($env:GITHUB_TOKEN) {
         Write-StatusOk -Label 'GITHUB_TOKEN' -Detail 'set'
     } else {
         Write-StatusFail -Label 'GITHUB_TOKEN' -Detail 'not set'
     }
+    if ($env:GITLAB_TOKEN) {
+        Write-StatusOk -Label 'GITLAB_TOKEN' -Detail 'set'
+    } else {
+        Write-StatusNotFound -Label 'GITLAB_TOKEN'
+    }
+    if ($env:GITEA_TOKEN) {
+        Write-StatusOk -Label 'GITEA_TOKEN' -Detail 'set'
+    } else {
+        Write-StatusNotFound -Label 'GITEA_TOKEN'
+    }
+    if ($env:FORGEJO_TOKEN) {
+        Write-StatusOk -Label 'FORGEJO_TOKEN' -Detail 'set'
+    } else {
+        Write-StatusNotFound -Label 'FORGEJO_TOKEN'
+    }
+
+    Write-Blank
+    Write-Host '  GitHub rate limit:' -ForegroundColor Cyan
 
     try {
         $rate = Invoke-GitHubApi -Url 'https://api.github.com/rate_limit'
@@ -747,6 +1108,8 @@ function Update-SinglePackage {
     .SYNOPSIS Checks for and applies an update for one package. Returns 'updated', 'uptodate', or 'failed'.
     #>
     param(
+        [string] $Provider = 'github',
+        [string] $ForgeHost = '',
         [Parameter(Mandatory)] [string] $Owner,
         [Parameter(Mandatory)] [string] $Repo,
         [string] $CurrentVersion = '',
@@ -756,8 +1119,9 @@ function Update-SinglePackage {
     )
 
     try {
-        Write-Trace "GET https://api.github.com/repos/$Owner/$Repo/releases/latest"
-        $release = Get-LatestRelease -Owner $Owner -Repo $Repo -IncludePrerelease:$IncludePrerelease
+        $displayName = Format-PackageReference -Provider $Provider -ForgeHost $ForgeHost -Owner $Owner -Repo $Repo
+        Write-Trace "checking latest release for $displayName"
+        $release = Get-LatestRelease -Provider $Provider -ForgeHost $ForgeHost -Owner $Owner -Repo $Repo -IncludePrerelease:$IncludePrerelease
         $releaseArchitecture = Resolve-ReleaseArchitecturePreference -RequestedArchitecture $Architecture
 
         if ($InstallType -eq 'source' -or (-not $release) -or (-not $releaseArchitecture.ReleaseEligible)) {
@@ -767,8 +1131,8 @@ function Update-SinglePackage {
                 Write-SubItem 'Architecture' "$($releaseArchitecture.DisplayLabel) (source fallback)"
             }
             Write-SubItem 'Action' 're-building from latest source'
-            $repoInfo = Get-RepoInfo -Owner $Owner -Repo $Repo
-            Invoke-SourceInstall -Owner $Owner -Repo $Repo -DefaultBranch ($repoInfo.default_branch)
+            $repoInfo = Get-RepoInfo -Provider $Provider -ForgeHost $ForgeHost -Owner $Owner -Repo $Repo
+            Invoke-SourceInstall -Provider $Provider -ForgeHost $ForgeHost -Owner $Owner -Repo $Repo -DefaultBranch ($repoInfo.default_branch)
             return 'updated'
         }
 
@@ -789,23 +1153,23 @@ function Update-SinglePackage {
         if ($assetToUse) {
             Write-SubItem 'Asset'  "$($assetToUse.name)  ($(Format-Bytes -Bytes $assetToUse.size))"
             Write-Blank
-            Invoke-ReleaseInstall -Owner $Owner -Repo $Repo -Release $release -Asset $assetToUse
+            Invoke-ReleaseInstall -Provider $Provider -ForgeHost $ForgeHost -Owner $Owner -Repo $Repo -Release $release -Asset $assetToUse -DisplayName $displayName
         } else {
             Write-Blank
-            $repoInfo = Get-RepoInfo -Owner $Owner -Repo $Repo
-            Invoke-SourceInstall -Owner $Owner -Repo $Repo -DefaultBranch ($repoInfo.default_branch)
+            $repoInfo = Get-RepoInfo -Provider $Provider -ForgeHost $ForgeHost -Owner $Owner -Repo $Repo
+            Invoke-SourceInstall -Provider $Provider -ForgeHost $ForgeHost -Owner $Owner -Repo $Repo -DefaultBranch ($repoInfo.default_branch) -DisplayName $displayName
         }
         return 'updated'
 
     } catch {
-        Write-WarnMsg "Update failed for $Owner/$Repo`: $($_.Exception.Message)"
+        Write-WarnMsg "Update failed for $(Format-PackageReference -Provider $Provider -ForgeHost $ForgeHost -Owner $Owner -Repo $Repo): $($_.Exception.Message)"
         return 'failed'
     }
 }
 
 function Invoke-Outdated {
     Write-Header
-    Write-Phase 'Outdated' 'checking installed packages against GitHub releases...'
+        Write-Phase 'outdated' 'checking installed packages against forge releases...'
     Write-Blank
 
     $entries = Read-Registry
@@ -818,11 +1182,11 @@ function Invoke-Outdated {
     $outdated = @()
     foreach ($entry in $entries) {
         if ($entry.install_type -eq 'source') { continue }
-        $release = Get-LatestRelease -Owner $entry.owner -Repo $entry.repo -IncludePrerelease:([bool]$entry.include_prerelease)
+        $release = Get-LatestRelease -Provider (Get-EntryProvider -Entry $entry) -ForgeHost (Get-EntryHost -Entry $entry) -Owner $entry.owner -Repo $entry.repo -IncludePrerelease:([bool]$entry.include_prerelease)
         if (-not $release) { continue }
         if ($entry.version -ne $release.tag_name) {
             $outdated += [PSCustomObject]@{
-                package    = "$($entry.owner)/$($entry.repo)"
+                package    = (Format-PackageReference -Provider (Get-EntryProvider -Entry $entry) -ForgeHost (Get-EntryHost -Entry $entry) -Owner $entry.owner -Repo $entry.repo)
                 installed  = if ($entry.version) { $entry.version } else { '(unknown)' }
                 latest     = $release.tag_name
                 prerelease = [bool]$release.prerelease
@@ -853,18 +1217,23 @@ function Invoke-Outdated {
 
 # ── Subcommand: info ──────────────────────────────────────────────────────────
 function Invoke-Info {
-    param([Parameter(Mandatory)] [string] $PackageTarget)
+    param(
+        [Parameter(Mandatory)] [string] $PackageTarget,
+        [object[]] $Arguments = @()
+    )
 
-    $parsed = Resolve-OwnerRepo -PackageTarget $PackageTarget
+    $parsed = Resolve-OwnerRepo -PackageTarget $PackageTarget -Arguments $Arguments
+    $provider = $parsed.Provider
+    $forgeHost = $parsed.Host
     $owner  = $parsed.Owner
     $repo   = $parsed.Repo
 
     Write-Header
-    Write-Phase 'Info' "$owner/$repo"
+    Write-Phase 'Info' $parsed.DisplayName
     Write-Blank
 
     # Registry entry
-    $entry = Get-RegistryEntry -Owner $owner -Repo $repo
+    $entry = Get-RegistryEntry -Provider $provider -ForgeHost $forgeHost -Owner $owner -Repo $repo
     if ($entry) {
         Write-Host '  Installed (WinGit registry):' -ForegroundColor Cyan
         $ver  = if ($entry.version) { $entry.version } else { 'unknown' }
@@ -881,6 +1250,7 @@ function Invoke-Info {
         if ($entry.asset_name) {
             Write-SubItem 'Asset' $entry.asset_name
         }
+        Write-SubItem 'Forge' "$((Get-EntryProvider -Entry $entry))  ($((Get-EntryHost -Entry $entry)))"
         if ($entry.PSObject.Properties.Name -contains 'path_entries' -and $entry.path_entries) {
             Write-SubItem 'PATH entries' ($entry.path_entries -join ', ')
         }
@@ -898,17 +1268,18 @@ function Invoke-Info {
     }
 
     Write-Blank
-    Write-Host '  GitHub:' -ForegroundColor Cyan
-    Write-Trace "GET https://api.github.com/repos/$owner/$repo"
+    Write-Host '  Remote:' -ForegroundColor Cyan
+    Write-Trace "provider=$provider host=$forgeHost"
 
-    $repoInfo = Get-RepoInfo -Owner $owner -Repo $repo
+    $repoInfo = Get-RepoInfo -Provider $provider -ForgeHost $forgeHost -Owner $owner -Repo $repo
     if ($repoInfo) {
         $stars   = if ($repoInfo.stargazers_count) { '{0:N0}' -f $repoInfo.stargazers_count } else { '0' }
         $forks   = if ($repoInfo.forks_count)      { '{0:N0}' -f $repoInfo.forks_count }      else { '0' }
         $lang    = if ($repoInfo.language)          { $repoInfo.language }                      else { 'Unknown' }
         $license = if ($repoInfo.license -and $repoInfo.license.spdx_id) { $repoInfo.license.spdx_id } else { 'None' }
 
-        Write-SubItem 'URL'      "https://github.com/$owner/$repo"
+        Write-SubItem 'URL'      $parsed.WebUrl
+        Write-SubItem 'Forge'    "$provider  ($forgeHost)"
         Write-SubItem 'Stars'    $stars
         Write-SubItem 'Forks'    $forks
         Write-SubItem 'Language' $lang
@@ -921,15 +1292,19 @@ function Invoke-Info {
         }
 
         Write-Blank
-        Write-Trace "GET https://api.github.com/repos/$owner/$repo/releases/latest"
-        $release = Get-LatestRelease -Owner $owner -Repo $repo
+        Write-Trace 'fetching latest release metadata'
+        $release = Get-LatestRelease -Provider $provider -ForgeHost $forgeHost -Owner $owner -Repo $repo
         if ($release) {
             Write-Host '  Latest release:' -ForegroundColor Cyan
             Write-SubItem 'Tag'       $release.tag_name
             Write-SubItem 'Published' ($release.published_at -replace 'T.*', '')
             if ($release.assets -and $release.assets.Count -gt 0) {
                 Write-SubItem 'Assets'   "$($release.assets.Count) file(s)"
-                $winAsset = Select-WindowsAsset -Assets $release.assets
+                $infoArchitecture = Get-SystemReleaseArchitecture
+                if ($infoArchitecture) {
+                    Write-SubItem 'Architecture' "$infoArchitecture (system)"
+                }
+                $winAsset = Select-WindowsAsset -Assets $release.assets -Architecture $infoArchitecture
                 if ($winAsset) {
                     Write-SubItem 'Windows'  "$($winAsset.name)  ($(Format-Bytes -Bytes $winAsset.size))"
                 }
@@ -939,7 +1314,7 @@ function Invoke-Info {
         }
 
     } else {
-        Write-Host "  Repository '$owner/$repo' not found on GitHub." -ForegroundColor Red
+        Write-Host "  Repository '$($parsed.DisplayName)' not found on $forgeHost." -ForegroundColor Red
     }
 
     Write-Blank
@@ -951,6 +1326,132 @@ function Invoke-List {
     Write-Phase 'Installed' 'packages:'
     Write-Blank
     Show-InstalledPackages
+}
+
+function Invoke-Verify {
+    param(
+        [string] $PackageTarget,
+        [object[]] $Arguments = @()
+    )
+
+    Write-Header
+
+    $entries = if (-not $PackageTarget -or $PackageTarget -eq '--all' -or $PackageTarget -eq '-a') {
+        @(Read-Registry | Sort-Object @{ Expression = { Get-EntryProvider -Entry $_ } }, @{ Expression = { Get-EntryHost -Entry $_ } }, owner, repo)
+    } else {
+        $parsed = Resolve-OwnerRepo -PackageTarget $PackageTarget -Arguments $Arguments
+        $entry = Get-RegistryEntry -Provider $parsed.Provider -ForgeHost $parsed.Host -Owner $parsed.Owner -Repo $parsed.Repo
+        if (-not $entry) {
+            Write-ErrorMsg "Package '$($parsed.DisplayName)' is not installed via WinGit." -ExitCode 1
+        }
+        @($entry)
+    }
+
+    if ($entries.Count -eq 0) {
+        Write-Host 'No packages installed by WinGit.' -ForegroundColor DarkGray
+        Write-Blank
+        return
+    }
+
+    $healthy = 0
+    $issues = 0
+    foreach ($entry in $entries) {
+        $report = Get-PackageVerificationReport -Entry $entry
+        Write-PackageVerificationReport -Report $report
+        if ($report.healthy) { $healthy++ } else { $issues++ }
+    }
+
+    Write-Host 'Verification summary:' -ForegroundColor Cyan
+    if ($healthy -gt 0) { Write-Host "  $healthy package(s) healthy." -ForegroundColor Green }
+    if ($issues -gt 0) { Write-Host "  $issues package(s) need attention." -ForegroundColor DarkYellow }
+    Write-Blank
+}
+
+function Invoke-Repair {
+    param(
+        [string] $PackageTarget,
+        [object[]] $Arguments = @()
+    )
+
+    if (-not $PackageTarget) {
+        Write-ErrorMsg "Missing target. Usage: wingit repair <owner>/<repo>  or  wingit repair --all" -ExitCode 1
+    }
+
+    Write-Header
+    Assert-Elevation -ScriptPath $PSCommandPath -Arguments (@('repair', $PackageTarget) + @($Arguments | ForEach-Object { [string]$_ }))
+
+    $entries = if ($PackageTarget -eq '--all' -or $PackageTarget -eq '-a') {
+        @(Read-Registry | Sort-Object @{ Expression = { Get-EntryProvider -Entry $_ } }, @{ Expression = { Get-EntryHost -Entry $_ } }, owner, repo)
+    } else {
+        $parsed = Resolve-OwnerRepo -PackageTarget $PackageTarget -Arguments $Arguments
+        $entry = Get-RegistryEntry -Provider $parsed.Provider -ForgeHost $parsed.Host -Owner $parsed.Owner -Repo $parsed.Repo
+        if (-not $entry) {
+            Write-ErrorMsg "Package '$($parsed.DisplayName)' is not installed via WinGit." -ExitCode 1
+        }
+        @($entry)
+    }
+
+    if ($entries.Count -eq 0) {
+        Write-Host 'No packages installed by WinGit.' -ForegroundColor DarkGray
+        Write-Blank
+        return
+    }
+
+    $repaired = 0
+    $ok = 0
+    $failed = 0
+    foreach ($entry in $entries) {
+        switch (Repair-PackageEntry -Entry $entry) {
+            'repaired' { $repaired++ }
+            'ok'       { $ok++ }
+            default    { $failed++ }
+        }
+    }
+
+    Write-Host 'Repair summary:' -ForegroundColor Cyan
+    if ($repaired -gt 0) { Write-Host "  $repaired package(s) repaired." -ForegroundColor Green }
+    if ($ok -gt 0) { Write-Host "  $ok package(s) already healthy." -ForegroundColor Gray }
+    if ($failed -gt 0) { Write-Host "  $failed package(s) still need manual action." -ForegroundColor DarkYellow }
+    Write-Blank
+}
+
+function Invoke-Clean {
+    param([string] $Target = '')
+
+    $cleanTemp = $true
+    $cleanLogs = $false
+
+    switch ($Target) {
+        ''       { }
+        '--logs' { $cleanTemp = $false; $cleanLogs = $true }
+        '--all'  { $cleanTemp = $true; $cleanLogs = $true }
+        default  { Write-ErrorMsg "Unknown option '$Target'. Usage: wingit clean [--logs|--all]" -ExitCode 1 }
+    }
+
+    Write-Header
+    Write-Phase 'Cleaning' 'WinGit working directories...'
+
+    if ($cleanTemp) {
+        $tempRoot = Get-WinGitTempRoot
+        if (Test-Path $tempRoot) {
+            Remove-Item -Path $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+            Write-SubItem 'Temp' $tempRoot
+        } else {
+            Write-SubItem 'Temp' 'already clean'
+        }
+    }
+
+    if ($cleanLogs) {
+        $logDir = Get-WinGitErrorLogDirectory
+        if (Test-Path $logDir) {
+            Remove-Item -Path $logDir -Recurse -Force -ErrorAction SilentlyContinue
+            Write-SubItem 'Logs' $logDir
+        } else {
+            Write-SubItem 'Logs' 'already clean'
+        }
+    }
+
+    Write-Blank
 }
 
 function Resolve-UserPath {
@@ -986,10 +1487,12 @@ function Invoke-Export {
         New-Item -ItemType Directory -Path $dir -Force | Out-Null
     }
 
-    $entries = @(Read-Registry | Sort-Object owner, repo)
+    $entries = @(Read-Registry | Sort-Object @{ Expression = { Get-EntryProvider -Entry $_ } }, @{ Expression = { Get-EntryHost -Entry $_ } }, owner, repo)
     $packages = @(
         foreach ($entry in $entries) {
             [PSCustomObject]@{
+                provider           = Get-EntryProvider -Entry $entry
+                host               = Get-EntryHost -Entry $entry
                 repository         = "$($entry.owner)/$($entry.repo)"
                 install_type       = if ($entry.install_type) { $entry.install_type } else { 'release' }
                 architecture       = if ($entry.architecture) { $entry.architecture } else { $null }
@@ -1056,19 +1559,28 @@ function Invoke-Import {
         } else {
             ''
         }
+        $packageProvider = if ($package.PSObject.Properties.Name -contains 'provider' -and $package.provider) { [string]$package.provider } else { 'github' }
+        $packageHost = if ($package.PSObject.Properties.Name -contains 'host' -and $package.host) { [string]$package.host } else { '' }
 
         if (-not $packageTarget) {
             Write-ErrorMsg 'Manifest entries must define a repository value in <owner>/<repo> format.' -ExitCode 1
         }
 
-        $parsed = Resolve-OwnerRepo -PackageTarget $packageTarget
-        $existing = Get-RegistryEntry -Owner $parsed.Owner -Repo $parsed.Repo
+        $specToken = if ($packageProvider -and $packageProvider -ne 'github') { $packageProvider } elseif ($packageHost) { $packageProvider } else { $packageTarget }
+        $specArgs = @()
+        if ($specToken -ne $packageTarget) {
+            $specLocator = if ($packageHost) { "$packageHost/$packageTarget" } else { $packageTarget }
+            $specArgs += $specLocator
+        }
+
+        $parsed = Resolve-OwnerRepo -PackageTarget $specToken -Arguments $specArgs
+        $existing = Get-RegistryEntry -Provider $parsed.Provider -ForgeHost $parsed.Host -Owner $parsed.Owner -Repo $parsed.Repo
 
         if ($existing) {
             Write-Phase 'Skipping' "$packageTarget..."
             Write-SubItem 'Status' 'already installed'
             if ($package.PSObject.Properties.Name -contains 'pinned') {
-                Set-PackagePinned -Owner $parsed.Owner -Repo $parsed.Repo -Pinned ([bool]$package.pinned) | Out-Null
+                Set-PackagePinned -Provider $parsed.Provider -ForgeHost $parsed.Host -Owner $parsed.Owner -Repo $parsed.Repo -Pinned ([bool]$package.pinned) | Out-Null
                 Write-SubItem 'Pinned' $(if ([bool]$package.pinned) { 'yes' } else { 'no' })
             }
             Write-Blank
@@ -1088,9 +1600,13 @@ function Invoke-Import {
             $installArgs += '--pre-release'
         }
 
-        Invoke-Install -PackageTarget $packageTarget -Arguments $installArgs
+        if ($installArgs.Count -gt 0) {
+            Invoke-Install -PackageTarget $specToken -Arguments (@($specArgs) + @($installArgs))
+        } else {
+            Invoke-Install -PackageTarget $specToken -Arguments $specArgs
+        }
         if ($package.PSObject.Properties.Name -contains 'pinned' -and [bool]$package.pinned) {
-            Set-PackagePinned -Owner $parsed.Owner -Repo $parsed.Repo -Pinned $true | Out-Null
+            Set-PackagePinned -Provider $parsed.Provider -ForgeHost $parsed.Host -Owner $parsed.Owner -Repo $parsed.Repo -Pinned $true | Out-Null
         }
         $installed++
     }
@@ -1102,37 +1618,46 @@ function Invoke-Import {
 }
 
 function Invoke-Pin {
-    param([Parameter(Mandatory)] [string] $PackageTarget)
+    param(
+        [Parameter(Mandatory)] [string] $PackageTarget,
+        [object[]] $Arguments = @()
+    )
 
-    $parsed = Resolve-OwnerRepo -PackageTarget $PackageTarget
+    $parsed = Resolve-OwnerRepo -PackageTarget $PackageTarget -Arguments $Arguments
     Write-Header
-    Assert-Elevation -ScriptPath $PSCommandPath -Arguments @('pin', $PackageTarget)
-    Write-Phase 'Pinning' "$PackageTarget..."
-    Set-PackagePinned -Owner $parsed.Owner -Repo $parsed.Repo -Pinned $true | Out-Null
+    Assert-Elevation -ScriptPath $PSCommandPath -Arguments (@('pin', $PackageTarget) + @($Arguments | ForEach-Object { [string]$_ }))
+    Write-Phase 'Pinning' $parsed.DisplayName
+    Set-PackagePinned -Provider $parsed.Provider -ForgeHost $parsed.Host -Owner $parsed.Owner -Repo $parsed.Repo -Pinned $true | Out-Null
     Write-SubItem 'Status' 'pinned'
     Write-Blank
 }
 
 function Invoke-Unpin {
-    param([Parameter(Mandatory)] [string] $PackageTarget)
+    param(
+        [Parameter(Mandatory)] [string] $PackageTarget,
+        [object[]] $Arguments = @()
+    )
 
-    $parsed = Resolve-OwnerRepo -PackageTarget $PackageTarget
+    $parsed = Resolve-OwnerRepo -PackageTarget $PackageTarget -Arguments $Arguments
     Write-Header
-    Assert-Elevation -ScriptPath $PSCommandPath -Arguments @('unpin', $PackageTarget)
-    Write-Phase 'Unpinning' "$PackageTarget..."
-    Set-PackagePinned -Owner $parsed.Owner -Repo $parsed.Repo -Pinned $false | Out-Null
+    Assert-Elevation -ScriptPath $PSCommandPath -Arguments (@('unpin', $PackageTarget) + @($Arguments | ForEach-Object { [string]$_ }))
+    Write-Phase 'Unpinning' $parsed.DisplayName
+    Set-PackagePinned -Provider $parsed.Provider -ForgeHost $parsed.Host -Owner $parsed.Owner -Repo $parsed.Repo -Pinned $false | Out-Null
     Write-SubItem 'Status' 'updates re-enabled'
     Write-Blank
 }
 
 # ── Subcommand: remove ────────────────────────────────────────────────────────
 function Invoke-Remove {
-    param([string] $PackageTarget)
+    param(
+        [string] $PackageTarget,
+        [object[]] $Arguments = @()
+    )
 
-    $parsed = Resolve-OwnerRepo -PackageTarget $PackageTarget
+    $parsed = Resolve-OwnerRepo -PackageTarget $PackageTarget -Arguments $Arguments
     Write-Header
-    Assert-Elevation -ScriptPath $PSCommandPath -Arguments @('remove', $PackageTarget)
-    Invoke-RemovePackage -Owner $parsed.Owner -Repo $parsed.Repo
+    Assert-Elevation -ScriptPath $PSCommandPath -Arguments (@('remove', $PackageTarget) + @($Arguments | ForEach-Object { [string]$_ }))
+    Invoke-RemovePackage -Provider $parsed.Provider -ForgeHost $parsed.Host -Owner $parsed.Owner -Repo $parsed.Repo
 }
 
 # ── Help ──────────────────────────────────────────────────────────────────────
@@ -1140,9 +1665,15 @@ function Show-Help {
     Write-Header
     @"
 Usage:
-  wingit install <owner>/<repo>   Install a package from GitHub
+  wingit install <owner>/<repo>   Install from GitHub shorthand
+  wingit install <provider> <target>   Install from GitHub, GitLab, Gitea, or Forgejo
   wingit update  <owner>/<repo>   Update an installed package to the latest version
+  wingit update  <provider> <target>   Update a package from a specific forge instance
   wingit update  --all            Update all packages installed by WinGit
+  wingit verify  <owner>/<repo>   Verify package files and PATH registration
+  wingit verify  --all            Verify all installed packages
+  wingit repair  <owner>/<repo>   Repair PATH registration for a package
+  wingit repair  --all            Repair PATH registration for all packages
   wingit remove  <owner>/<repo>   Remove an installed package
   wingit pin     <owner>/<repo>   Prevent update --all from upgrading a package
   wingit unpin   <owner>/<repo>   Re-enable update --all for a package
@@ -1151,7 +1682,8 @@ Usage:
   wingit outdated                 Show installed packages with newer releases available
   wingit export  [file]           Export installed packages to a manifest JSON file
   wingit import  <file>           Install packages from a manifest JSON file
-  wingit search  <query>          Search GitHub repositories
+  wingit clean    [--logs|--all]  Remove temp workspace and optional logs
+  wingit search  [provider] [host] <query>   Search repositories on a forge instance
   wingit doctor                   Run environment diagnostics
   wingit --version                Print WinGit version
   wingit --help                   Show this help message
@@ -1164,21 +1696,34 @@ Options:
 
 Examples:
   wingit install cli/cli
+  wingit install https://github.com/cli/cli
+  wingit install github cli/cli
+  wingit install gitlab gitlab.com/gitlab-org/gitlab
+  wingit install forgejo codeberg.org/forgejo/forgejo
+  wingit install gitea git.example.com/team/tool
   wingit install sharkdp/bat --source
   wingit install neovim/neovim
   wingit install BurntSushi/ripgrep
   wingit update  cli/cli
+  wingit update  gitlab gitlab.com/gitlab-org/gitlab
   wingit update  --all
+  wingit verify  --all
+  wingit repair  cli/cli
   wingit pin     cli/cli
   wingit export  packages.json
   wingit import  packages.json
+  wingit clean   --all
   wingit info    cli/cli
   wingit outdated
   wingit search  terminal
+  wingit search  gitlab gitlab.com terminal
   wingit doctor
 
 Environment variables:
-  GITHUB_TOKEN    GitHub personal access token (increases API rate limit to 5,000/hr)
+  GITHUB_TOKEN    GitHub personal access token
+  GITLAB_TOKEN    GitLab personal access token
+  GITEA_TOKEN     Gitea personal access token
+  FORGEJO_TOKEN   Forgejo personal access token
 "@ | Write-Host
 }
 
@@ -1186,36 +1731,47 @@ Environment variables:
 switch ($Command.ToLower()) {
     'install' {
         if (-not $Target) {
-            Write-ErrorMsg "Missing target. Usage: wingit install <owner>/<repo>" -ExitCode 1
+            Write-ErrorMsg "Missing target. Usage: wingit install <owner>/<repo>  or  wingit install <provider> <target>" -ExitCode 1
         }
-        Invoke-Install -PackageTarget $Target -Arguments $ExtraArgs
+        $installArgs = @(Normalize-RemainingArguments -Arguments $ExtraArgs)
+        if ($installArgs.Count -gt 0) {
+            Invoke-Install -PackageTarget $Target -Arguments $installArgs
+        } else {
+            Invoke-Install -PackageTarget $Target
+        }
     }
     'update' {
-        Invoke-Update -PackageTarget $Target
+        Invoke-Update -PackageTarget $Target -Arguments $ExtraArgs
+    }
+    'verify' {
+        Invoke-Verify -PackageTarget $Target -Arguments $ExtraArgs
+    }
+    'repair' {
+        Invoke-Repair -PackageTarget $Target -Arguments $ExtraArgs
     }
     'remove' {
         if (-not $Target) {
-            Write-ErrorMsg "Missing target. Usage: wingit remove <owner>/<repo>" -ExitCode 1
+            Write-ErrorMsg "Missing target. Usage: wingit remove <owner>/<repo>  or  wingit remove <provider> <target>" -ExitCode 1
         }
-        Invoke-Remove -PackageTarget $Target
+        Invoke-Remove -PackageTarget $Target -Arguments $ExtraArgs
     }
     'pin' {
         if (-not $Target) {
-            Write-ErrorMsg "Missing target. Usage: wingit pin <owner>/<repo>" -ExitCode 1
+            Write-ErrorMsg "Missing target. Usage: wingit pin <owner>/<repo>  or  wingit pin <provider> <target>" -ExitCode 1
         }
-        Invoke-Pin -PackageTarget $Target
+        Invoke-Pin -PackageTarget $Target -Arguments $ExtraArgs
     }
     'unpin' {
         if (-not $Target) {
-            Write-ErrorMsg "Missing target. Usage: wingit unpin <owner>/<repo>" -ExitCode 1
+            Write-ErrorMsg "Missing target. Usage: wingit unpin <owner>/<repo>  or  wingit unpin <provider> <target>" -ExitCode 1
         }
-        Invoke-Unpin -PackageTarget $Target
+        Invoke-Unpin -PackageTarget $Target -Arguments $ExtraArgs
     }
     'info' {
         if (-not $Target) {
-            Write-ErrorMsg "Missing target. Usage: wingit info <owner>/<repo>" -ExitCode 1
+            Write-ErrorMsg "Missing target. Usage: wingit info <owner>/<repo>  or  wingit info <provider> <target>" -ExitCode 1
         }
-        Invoke-Info -PackageTarget $Target
+        Invoke-Info -PackageTarget $Target -Arguments $ExtraArgs
     }
     'list' {
         Invoke-List
@@ -1232,15 +1788,14 @@ switch ($Command.ToLower()) {
         }
         Invoke-Import -ManifestPath $Target
     }
+    'clean' {
+        Invoke-Clean -Target $Target
+    }
     'search' {
         if (-not $Target) {
-            Write-ErrorMsg "Missing query. Usage: wingit search <query>" -ExitCode 1
+            Write-ErrorMsg "Missing query. Usage: wingit search [provider] [host] <query>" -ExitCode 1
         }
-        # Allow multi-word query from remaining args
-        if ($ExtraArgs -and $ExtraArgs.Count -gt 0) {
-            $Target = @($Target) + @($ExtraArgs | ForEach-Object { [string]$_ }) -join ' '
-        }
-        Invoke-Search -Query $Target
+        Invoke-Search -Query $Target -Arguments $ExtraArgs
     }
     'doctor' {
         Invoke-Doctor

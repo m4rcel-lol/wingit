@@ -680,6 +680,19 @@ function Add-DirectoryToSystemPath {
     return $true
 }
 
+function Test-DirectoryInSystemPath {
+    <#
+    .SYNOPSIS Checks whether a directory is currently registered on the machine PATH.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] [string] $Directory)
+
+    $targetPath = Get-NormalizedDirectoryPath -Path $Directory
+    return [bool](Get-SystemPathEntries | Where-Object {
+        (Get-NormalizedDirectoryPath -Path $_) -ieq $targetPath
+    } | Select-Object -First 1)
+}
+
 function Remove-DirectoryFromSystemPath {
     <#
     .SYNOPSIS Removes a directory from the system PATH when present.

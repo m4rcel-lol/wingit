@@ -59,6 +59,45 @@ function Save-Registry {
     Set-Content -Path $path -Value $json -Encoding UTF8
 }
 
+function Get-EntryProvider {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] [object] $Entry)
+
+    if ($Entry.PSObject.Properties.Name -contains 'provider' -and $Entry.provider) {
+        return Get-NormalizedForgeProvider -Provider ([string]$Entry.provider)
+    }
+
+    return 'github'
+}
+
+function Get-EntryHost {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] [object] $Entry)
+
+    $provider = Get-EntryProvider -Entry $Entry
+    $forgeHost = if ($Entry.PSObject.Properties.Name -contains 'host') { [string]$Entry.host } else { '' }
+    return Get-NormalizedForgeHost -Provider $provider -ForgeHost $forgeHost
+}
+
+function Format-PackageReference {
+    [CmdletBinding()]
+    param(
+        [string] $Provider = 'github',
+        [string] $ForgeHost = '',
+        [Parameter(Mandatory)] [string] $Owner,
+        [Parameter(Mandatory)] [string] $Repo
+    )
+
+    $providerName = Get-NormalizedForgeProvider -Provider $Provider
+    $hostName = Get-NormalizedForgeHost -Provider $providerName -ForgeHost $ForgeHost
+
+    if ($providerName -eq 'github' -and $hostName -eq 'github.com') {
+        return "$Owner/$Repo"
+    }
+
+    return "$providerName $hostName/$Owner/$Repo"
+}
+
 function Get-RegistryEntry {
     <#
     .SYNOPSIS Returns a single registry entry for an owner/repo pair.
@@ -66,11 +105,21 @@ function Get-RegistryEntry {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)] [string] $Owner,
-        [Parameter(Mandatory)] [string] $Repo
+        [Parameter(Mandatory)] [string] $Repo,
+        [string] $Provider = 'github',
+        [string] $ForgeHost = ''
     )
 
+    $providerName = Get-NormalizedForgeProvider -Provider $Provider
+    $hostName = Get-NormalizedForgeHost -Provider $providerName -ForgeHost $ForgeHost
+
     return Read-Registry |
-        Where-Object { $_.owner -eq $Owner -and $_.repo -eq $Repo } |
+        Where-Object {
+            $_.owner -eq $Owner -and
+            $_.repo -eq $Repo -and
+            (Get-EntryProvider -Entry $_) -eq $providerName -and
+            (Get-EntryHost -Entry $_) -eq $hostName
+        } |
         Select-Object -First 1
 }
 
@@ -109,6 +158,8 @@ function Add-RegistryEntry {
     param(
         [Parameter(Mandatory)] [string] $Owner,
         [Parameter(Mandatory)] [string] $Repo,
+        [string] $Provider = 'github',
+        [string] $ForgeHost = '',
         [string] $Version     = '',
         [string] $InstallType = 'release',
         [string] $InstallPath = '',
@@ -120,9 +171,21 @@ function Add-RegistryEntry {
     )
 
     $entries = Read-Registry
-    $existing = $entries | Where-Object { $_.owner -eq $Owner -and $_.repo -eq $Repo } | Select-Object -First 1
+    $providerName = Get-NormalizedForgeProvider -Provider $Provider
+    $hostName = Get-NormalizedForgeHost -Provider $providerName -ForgeHost $ForgeHost
+    $existing = $entries | Where-Object {
+        $_.owner -eq $Owner -and $_.repo -eq $Repo -and
+        (Get-EntryProvider -Entry $_) -eq $providerName -and
+        (Get-EntryHost -Entry $_) -eq $hostName
+    } | Select-Object -First 1
     # Remove any existing entry for this owner/repo
-    $entries = @($entries | Where-Object { -not ($_.owner -eq $Owner -and $_.repo -eq $Repo) })
+    $entries = @($entries | Where-Object {
+        -not (
+            $_.owner -eq $Owner -and $_.repo -eq $Repo -and
+            (Get-EntryProvider -Entry $_) -eq $providerName -and
+            (Get-EntryHost -Entry $_) -eq $hostName
+        )
+    })
 
     $pinnedValue = if ($null -ne $Pinned) {
         [bool] $Pinned
@@ -133,6 +196,8 @@ function Add-RegistryEntry {
     }
 
     $newEntry = [PSCustomObject]@{
+        provider     = $providerName
+        host         = $hostName
         owner        = $Owner
         repo         = $Repo
         version      = $Version
@@ -158,15 +223,19 @@ function Set-PackagePinned {
     param(
         [Parameter(Mandatory)] [string] $Owner,
         [Parameter(Mandatory)] [string] $Repo,
+        [string] $Provider = 'github',
+        [string] $ForgeHost = '',
         [Parameter(Mandatory)] [bool] $Pinned
     )
 
     $entries = Read-Registry
+    $providerName = Get-NormalizedForgeProvider -Provider $Provider
+    $hostName = Get-NormalizedForgeHost -Provider $providerName -ForgeHost $ForgeHost
     $updatedEntries = @()
     $updatedEntry = $null
 
     foreach ($entry in $entries) {
-        if ($entry.owner -eq $Owner -and $entry.repo -eq $Repo) {
+        if ($entry.owner -eq $Owner -and $entry.repo -eq $Repo -and (Get-EntryProvider -Entry $entry) -eq $providerName -and (Get-EntryHost -Entry $entry) -eq $hostName) {
             $copy = $entry | Select-Object *
             if ($copy.PSObject.Properties.Name -contains 'pinned') {
                 $copy.pinned = $Pinned
@@ -181,7 +250,7 @@ function Set-PackagePinned {
     }
 
     if (-not $updatedEntry) {
-        Write-ErrorMsg "Package '$Owner/$Repo' is not installed via WinGit." -ExitCode 1
+        Write-ErrorMsg "Package '$(Format-PackageReference -Provider $providerName -ForgeHost $hostName -Owner $Owner -Repo $Repo)' is not installed via WinGit." -ExitCode 1
     }
 
     Save-Registry -Entries $updatedEntries
@@ -198,15 +267,29 @@ function Remove-RegistryEntry {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)] [string] $Owner,
-        [Parameter(Mandatory)] [string] $Repo
+        [Parameter(Mandatory)] [string] $Repo,
+        [string] $Provider = 'github',
+        [string] $ForgeHost = ''
     )
 
     $entries = Read-Registry
-    $target  = $entries | Where-Object { $_.owner -eq $Owner -and $_.repo -eq $Repo } | Select-Object -First 1
+    $providerName = Get-NormalizedForgeProvider -Provider $Provider
+    $hostName = Get-NormalizedForgeHost -Provider $providerName -ForgeHost $ForgeHost
+    $target  = $entries | Where-Object {
+        $_.owner -eq $Owner -and $_.repo -eq $Repo -and
+        (Get-EntryProvider -Entry $_) -eq $providerName -and
+        (Get-EntryHost -Entry $_) -eq $hostName
+    } | Select-Object -First 1
 
     if (-not $target) { return $null }
 
-    $entries = @($entries | Where-Object { -not ($_.owner -eq $Owner -and $_.repo -eq $Repo) })
+    $entries = @($entries | Where-Object {
+        -not (
+            $_.owner -eq $Owner -and $_.repo -eq $Repo -and
+            (Get-EntryProvider -Entry $_) -eq $providerName -and
+            (Get-EntryHost -Entry $_) -eq $hostName
+        )
+    })
     Save-Registry -Entries $entries
     return $target
 }
@@ -225,7 +308,7 @@ function Show-InstalledPackages {
         return
     }
 
-    $colPkg     = 30
+    $colPkg     = 52
     $colVer     = 14
     $colType    = 10
     $colFlags   = 18
@@ -238,7 +321,7 @@ function Show-InstalledPackages {
     Write-Host $divider
 
     foreach ($e in $entries) {
-        $pkg  = "$($e.owner)/$($e.repo)".PadRight($colPkg)
+        $pkg  = (Format-PackageReference -Provider (Get-EntryProvider -Entry $e) -ForgeHost (Get-EntryHost -Entry $e) -Owner $e.owner -Repo $e.repo).PadRight($colPkg)
         $ver  = ($e.version -replace '^v','').PadRight($colVer)
         $type = $e.install_type.PadRight($colType)
         $flags = @()
@@ -274,16 +357,18 @@ function Invoke-RemovePackage {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)] [string] $Owner,
-        [Parameter(Mandatory)] [string] $Repo
+        [Parameter(Mandatory)] [string] $Repo,
+        [string] $Provider = 'github',
+        [string] $ForgeHost = ''
     )
 
-    $entry = Get-RegistryEntry -Owner $Owner -Repo $Repo
+    $entry = Get-RegistryEntry -Owner $Owner -Repo $Repo -Provider $Provider -ForgeHost $ForgeHost
 
     if (-not $entry) {
-        Write-ErrorMsg "Package '$Owner/$Repo' is not installed via WinGit." -ExitCode 1
+        Write-ErrorMsg "Package '$(Format-PackageReference -Provider $Provider -ForgeHost $ForgeHost -Owner $Owner -Repo $Repo)' is not installed via WinGit." -ExitCode 1
     }
 
-    Write-Phase 'Removing' "$Owner/$Repo..."
+    Write-Phase 'Removing' (Format-PackageReference -Provider (Get-EntryProvider -Entry $entry) -ForgeHost (Get-EntryHost -Entry $entry) -Owner $Owner -Repo $Repo)
     $pathEntries = @(Get-PackagePathEntries -Entry $entry)
 
     # Try to run an uninstaller if found
@@ -303,9 +388,9 @@ function Invoke-RemovePackage {
         Remove-DirectoryFromSystemPath -Directory $pathEntry | Out-Null
     }
 
-    Remove-RegistryEntry -Owner $Owner -Repo $Repo | Out-Null
+    Remove-RegistryEntry -Owner $Owner -Repo $Repo -Provider (Get-EntryProvider -Entry $entry) -ForgeHost (Get-EntryHost -Entry $entry) | Out-Null
     Write-Host ''
-    Write-Host "Complete." -ForegroundColor Green
-    Write-Host "  $Owner/$Repo has been removed." -ForegroundColor Gray
+    Write-Host ':: Remove complete' -ForegroundColor Green
+    Write-Host ("   removed " + (Format-PackageReference -Provider (Get-EntryProvider -Entry $entry) -ForgeHost (Get-EntryHost -Entry $entry) -Owner $Owner -Repo $Repo)) -ForegroundColor Gray
     Write-Host ''
 }

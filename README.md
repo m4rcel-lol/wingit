@@ -1,24 +1,29 @@
-# WinGit — GitHub-native package manager for Windows
+# WinGit — Forge-native package manager for Windows
 
-WinGit installs software directly from GitHub repositories. It downloads the
-latest release binary when one is available, or clones the source and compiles
-it locally when no binary release exists.
+WinGit installs software directly from GitHub, GitLab, Gitea, Forgejo, and
+compatible self-hosted forge instances. It downloads the latest matching
+Windows release binary when one is available, or clones/downloads the source
+and builds it locally when no usable binary release exists.
 
 ---
 
 ## Features
 
-- **Release install** — auto-detects `x64` or `arm64` and downloads the matching Windows binary asset (`.msi`, `.exe`, `.zip`, `.tar.gz`) from the latest GitHub release.
+- **Multi-forge installs** — supports GitHub, GitLab, Gitea, Forgejo, and compatible custom instances by host name.
+- **Release install** — auto-detects `x64` or `arm64` and downloads the matching Windows binary asset (`.msi`, `.exe`, `.zip`, `.tar.gz`) from the latest forge release.
 - **Source build** — auto-detects the build system (CMake, Cargo, Go, npm, Python, Gradle, Maven, MSBuild, Meson, Make) and compiles from source.
 - **Update** — updates an installed package to the latest version, or updates all packages at once with `--all`.
+- **Flexible targets** — accepts `owner/repo`, full repository URLs, or `<provider> <host>/<owner>/<repo>` for custom instances.
 - **Package pinning** — pin packages to keep them out of `update --all` until you explicitly unpin them.
 - **Outdated report** — checks installed release packages and shows which ones have updates available.
-- **Info** — shows GitHub metadata and local install details for any package.
+- **Verify & repair** — audit installed packages for missing files/PATH entries and repair PATH registration when possible.
+- **Info** — shows remote forge metadata and local install details for any package.
 - **Manifest export/import** — snapshot installed packages to JSON and recreate them on another machine.
-- **Search** — searches GitHub repositories and prints the top matches with stars, language, and URLs.
-- **Doctor** — checks environment readiness (core/build tools + GitHub API rate-limit status).
+- **Clean** — clears WinGit temp workspaces and optional install-failure logs.
+- **Search** — searches repositories on GitHub, GitLab, Gitea, or Forgejo instances.
+- **Doctor** — checks environment readiness (core/build tools + forge support status).
 - **Dependency bootstrapping** — installs missing build tools automatically via Chocolatey, with direct-installer fallback.
-- **rpm-ostree-style output** — structured, phase-labelled terminal output with progress bars and spinners.
+- **Pacman-inspired output** — compact package-manager style terminal output with clearer phase transitions.
 - **CMD & PowerShell** — works identically from both `cmd.exe` and `powershell.exe` (no execution-policy errors).
 - **Verbose mode** — pass `-v` or `--verbose` to see diagnostic URLs and extra detail.
 - **Source fallback** — if the machine architecture is not `x64` or `arm64`, WinGit skips release binaries and builds from source in `%TEMP%`.
@@ -39,16 +44,22 @@ cd wingit
 .\install.ps1
 ```
 
-Then open a new terminal — `wingit` will be on your PATH.
+Then open a new terminal. `wingit` will be on your PATH.
 
 ---
 
 ## Usage
 
 ```
-wingit install <owner>/<repo>   Install a package from GitHub
-wingit update  <owner>/<repo>   Update an installed package to the latest version
+wingit install <owner>/<repo>           Install using GitHub shorthand
+wingit install <provider> <target>      Install from GitHub, GitLab, Gitea, or Forgejo
+wingit update  <owner>/<repo>           Update an installed package to the latest version
+wingit update  <provider> <target>      Update a package from a specific forge instance
 wingit update  --all            Update all packages installed by WinGit
+wingit verify  <owner>/<repo>   Verify package files and PATH registration
+wingit verify  --all            Verify all installed packages
+wingit repair  <owner>/<repo>   Repair PATH registration for a package
+wingit repair  --all            Repair PATH registration for all packages
 wingit remove  <owner>/<repo>   Remove an installed package
 wingit pin     <owner>/<repo>   Prevent update --all from upgrading a package
 wingit unpin   <owner>/<repo>   Re-enable update --all for a package
@@ -57,7 +68,8 @@ wingit list                     List packages installed by WinGit
 wingit outdated                 Show installed packages with newer releases available
 wingit export  [file]           Export installed packages to a manifest JSON file
 wingit import  <file>           Install packages from a manifest JSON file
-wingit search  <query>          Search GitHub repositories
+wingit clean   [--logs|--all]   Remove temp workspace and optional logs
+wingit search  [provider] [host] <query>   Search repositories on a forge instance
 wingit doctor                   Run environment diagnostics
 wingit --version                Print WinGit version
 wingit --help                   Show help
@@ -78,6 +90,21 @@ wingit --help                   Show help
 # Install GitHub CLI (release binary)
 wingit install cli/cli
 
+# Install from a full GitHub URL
+wingit install https://github.com/cli/cli
+
+# Install from GitHub using explicit provider syntax
+wingit install github cli/cli
+
+# Install from GitLab
+wingit install gitlab gitlab.com/gitlab-org/gitlab
+
+# Install from Forgejo
+wingit install forgejo codeberg.org/forgejo/forgejo
+
+# Install from a self-hosted Gitea instance
+wingit install gitea git.example.com/team/tool
+
 # Install Neovim (source build if no Windows binary found)
 wingit install neovim/neovim
 
@@ -90,8 +117,17 @@ wingit install BurntSushi/ripgrep
 # Update a package to the latest version
 wingit update cli/cli
 
+# Update a GitLab package
+wingit update gitlab gitlab.com/gitlab-org/gitlab
+
 # Update all installed packages
 wingit update --all
+
+# Verify package health
+wingit verify --all
+
+# Repair missing PATH registration
+wingit repair cli/cli
 
 # Pin a package so update --all leaves it alone
 wingit pin cli/cli
@@ -108,6 +144,9 @@ wingit outdated
 # Search for packages related to "terminal"
 wingit search terminal
 
+# Search GitLab repositories on gitlab.com
+wingit search gitlab gitlab.com terminal
+
 # Check environment/tooling health
 wingit doctor
 
@@ -119,6 +158,9 @@ wingit export packages.json
 
 # Install packages from a saved manifest
 wingit import packages.json
+
+# Remove temp workspaces and logs
+wingit clean --all
 
 # Install with verbose diagnostic output
 wingit install cli/cli -v
@@ -132,6 +174,8 @@ wingit install cli/cli -v
   "packages": [
     {
       "repository": "cli/cli",
+      "provider": "github",
+      "host": "github.com",
       "install_type": "release",
       "architecture": "x64",
       "include_prerelease": false,
@@ -139,6 +183,8 @@ wingit install cli/cli -v
     },
     {
       "repository": "BurntSushi/ripgrep",
+      "provider": "github",
+      "host": "github.com",
       "install_type": "source",
       "include_prerelease": false,
       "pinned": false
@@ -149,38 +195,43 @@ wingit install cli/cli -v
 
 ### Environment variables
 
-| Variable       | Description |
-|----------------|-------------|
-| `GITHUB_TOKEN` | Personal access token — raises API rate limit to 5,000/hr |
+| Variable | Description |
+|----------|-------------|
+| `GITHUB_TOKEN` | GitHub personal access token |
+| `GITLAB_TOKEN` | GitLab personal access token |
+| `GITEA_TOKEN` | Gitea personal access token |
+| `FORGEJO_TOKEN` | Forgejo personal access token |
 
 ---
 
 ## Output style
 
-WinGit emulates the rpm-ostree terminal style:
+WinGit now uses a pacman-inspired flow:
 
 ```
-WinGit  -- GitHub-native package manager for Windows
+:: WinGit 3.0.0 - universal forge package manager for Windows
 
-Resolving    cli/cli...
-  Repository : https://github.com/cli/cli
-  Stars      : 37,842
-  Language   : Go
-  About      : GitHub's official command line tool
+:: resolving github github.com/cli/cli
+   Repository     : https://github.com/cli/cli
+   Forge          : github  (github.com)
+   Stars          : 37,842
+   Language       : Go
+   About          : GitHub's official command line tool
 
-Checking     releases...
-  Latest     : v2.62.0  (2024-11-15)
-  Asset      : gh_2.62.0_windows_amd64.msi  (12.4 MB)
+:: checking releases...
+   Architecture   : x64 (auto-detected)
+   Latest         : v2.62.0  (2024-11-15)
+   Asset          : gh_2.62.0_windows_amd64.msi  (12.4 MB)
 
-Downloading  gh_2.62.0_windows_amd64.msi
-  [=============================================>    ]   89%  10.2 MB/s
+:: downloading gh_2.62.0_windows_amd64.msi
+   [=============================================>    ]   89%  10.2 MB/s
 
-Installing   gh_2.62.0_windows_amd64.msi
-  Method     : msiexec /quiet
+:: installing gh_2.62.0_windows_amd64.msi
+   Method         : msiexec /quiet
 
-Complete.
-  cli/cli v2.62.0 is now installed.
-  Run 'gh --version' to verify.
+:: Installation complete
+   installed cli/cli v2.62.0
+   run 'gh --version' to verify
 ```
 
 ---
@@ -192,7 +243,7 @@ WinGit/
 ├── wingit.cmd          ← Entry point for CMD and PowerShell (uses -ExecutionPolicy Bypass)
 ├── wingit-core.ps1     ← Core logic (argument parsing + command dispatch)
 ├── lib/
-│   ├── api.ps1         ← GitHub API functions
+│   ├── api.ps1         ← Multi-forge API functions
 │   ├── download.ps1    ← Download + progress bar utilities
 │   ├── build.ps1       ← Build system detection + execution
 │   ├── tools.ps1       ← Build tool installation (Chocolatey / direct)
