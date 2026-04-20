@@ -40,6 +40,7 @@ $script:ChocoPackages = @{
 $script:DirectInstallers = @{
     cmake   = 'Get-CmakeInstallerUrl'
     git     = 'Get-GitInstallerUrl'
+    ninja   = 'Get-NinjaInstallerUrl'
     node    = 'Get-NodeInstallerUrl'
     python  = 'Get-PythonInstallerUrl'
     python3 = 'Get-PythonInstallerUrl'
@@ -113,10 +114,47 @@ function Install-ToolViaChoco {
     }
 
     Write-Action "choco install $pkg -y"
-    $output = & choco install $pkg -y --no-progress 2>&1
-    Write-IndentedBlock ($output -join "`n")
+    $result = Invoke-NativeCommand -FilePath 'choco' -ArgumentList @('install', $pkg, '-y', '--no-progress') -CaptureOutput
+    if ($result.Output.Count -gt 0) {
+        Write-IndentedBlock ($result.Output -join "`n")
+    }
+    if ($result.ExitCode -ne 0) {
+        Write-WarnMsg "choco install exited with code $($result.ExitCode)."
+        return $false
+    }
     Update-EnvironmentPath
     return (Test-ToolOnPath $ToolName)
+}
+
+function Get-DirectInstallerFileName {
+    <#
+    .SYNOPSIS Resolves a stable local filename for a direct installer download.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string] $ToolName,
+        [Parameter(Mandatory)] [string] $InstallerUrl
+    )
+
+    $fileName = ''
+    try {
+        $uri = [System.Uri]$InstallerUrl
+        $fileName = [System.IO.Path]::GetFileName($uri.AbsolutePath)
+    } catch {
+        $fileName = [System.IO.Path]::GetFileName($InstallerUrl)
+    }
+
+    if (-not $fileName) {
+        $fileName = "$ToolName-installer.exe"
+    }
+
+    switch ($ToolName) {
+        'cargo' { if (-not $fileName.ToLower().EndsWith('.exe')) { return 'rustup-init.exe' } }
+        'rustc' { if (-not $fileName.ToLower().EndsWith('.exe')) { return 'rustup-init.exe' } }
+        'dotnet' { if (-not $fileName.ToLower().EndsWith('.ps1')) { return 'dotnet-install.ps1' } }
+    }
+
+    return $fileName
 }
 
 # --- Direct installer URL resolvers ---
@@ -137,6 +175,16 @@ function Get-GitInstallerUrl {
     #>
     $release = Invoke-GitHubApi 'https://api.github.com/repos/git-for-windows/git/releases/latest'
     $asset   = $release.assets | Where-Object { $_.name -like '*64-bit.exe' } | Select-Object -First 1
+    if ($asset) { return $asset.browser_download_url }
+    return $null
+}
+
+function Get-NinjaInstallerUrl {
+    <#
+    .SYNOPSIS Returns the latest Ninja Windows zip URL via the GitHub API.
+    #>
+    $release = Invoke-GitHubApi 'https://api.github.com/repos/ninja-build/ninja/releases/latest'
+    $asset   = $release.assets | Where-Object { $_.name -like '*win.zip' } | Select-Object -First 1
     if ($asset) { return $asset.browser_download_url }
     return $null
 }
@@ -230,6 +278,38 @@ function Install-ToolDirect {
     [CmdletBinding()]
     param([Parameter(Mandatory)] [string] $ToolName)
 
+    if ($ToolName -eq 'meson') {
+        $pythonCmd = if (Test-ToolOnPath 'python') {
+            'python'
+        } elseif (Test-ToolOnPath 'python3') {
+            'python3'
+        } else {
+            Install-ToolDirect -ToolName 'python' | Out-Null
+            if (Test-ToolOnPath 'python') { 'python' } elseif (Test-ToolOnPath 'python3') { 'python3' } else { $null }
+        }
+
+        if (-not $pythonCmd) {
+            throw 'Meson requires Python, and Python could not be installed.'
+        }
+
+        Write-Action 'Installing meson via python -m pip install meson'
+        $result = Invoke-NativeCommand -FilePath $pythonCmd -ArgumentList @('-m', 'pip', 'install', 'meson')
+        if ($result.ExitCode -ne 0) {
+            throw "python -m pip install meson failed (exit $($result.ExitCode))"
+        }
+
+        try {
+            $pythonDir = Split-Path (Get-Command $pythonCmd -ErrorAction Stop).Source
+            $scriptsDir = Join-Path $pythonDir 'Scripts'
+            if (Test-Path $scriptsDir) {
+                Add-DirectoryToSystemPath -Directory $scriptsDir | Out-Null
+            }
+        } catch {}
+
+        Update-EnvironmentPath
+        return (Test-ToolOnPath 'meson')
+    }
+
     $resolverName = $script:DirectInstallers[$ToolName]
     if (-not $resolverName) {
         Write-WarnMsg "No direct installer available for '$ToolName'."
@@ -242,8 +322,13 @@ function Install-ToolDirect {
         return $false
     }
 
-    $installerDir  = [System.IO.Path]::Combine($env:TEMP, 'wingit', 'installers')
-    $installerFile = [System.IO.Path]::Combine($installerDir, [System.IO.Path]::GetFileName($installerUrl))
+    $installerDir = [System.IO.Path]::Combine($env:TEMP, 'wingit', 'installers')
+    if (-not (Test-Path $installerDir)) {
+        New-Item -ItemType Directory -Path $installerDir -Force | Out-Null
+    }
+
+    $installerName = Get-DirectInstallerFileName -ToolName $ToolName -InstallerUrl $installerUrl
+    $installerFile = [System.IO.Path]::Combine($installerDir, $installerName)
 
     Write-Action "Downloading installer for $ToolName from $installerUrl"
     Invoke-Download -Url $installerUrl -Destination $installerFile
@@ -253,8 +338,42 @@ function Install-ToolDirect {
         Write-Action "Running installer for $ToolName (attempt $i/$maxAttempts)..."
 
         $ext = [System.IO.Path]::GetExtension($installerFile).ToLower()
+        $toolInstallDir = [System.IO.Path]::Combine($env:ProgramFiles, 'WinGit', 'tools', $ToolName)
         if ($ext -eq '.msi') {
             $proc = Start-Process 'msiexec.exe' -ArgumentList "/i `"$installerFile`" /quiet /norestart" -Wait -PassThru
+        } elseif ($ext -eq '.ps1') {
+            $installDir = if ($ToolName -eq 'dotnet') {
+                [System.IO.Path]::Combine($env:ProgramFiles, 'dotnet')
+            } else {
+                $toolInstallDir
+            }
+
+            if (-not (Test-Path $installDir)) {
+                New-Item -ItemType Directory -Path $installDir -Force | Out-Null
+            }
+
+            $proc = Start-Process 'powershell.exe' `
+                -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $installerFile, '-InstallDir', $installDir, '-Channel', 'LTS') `
+                -Wait -PassThru
+
+            if ($ToolName -eq 'dotnet' -and (Test-Path $installDir)) {
+                Add-DirectoryToSystemPath -Directory $installDir | Out-Null
+            }
+        } elseif ($ext -eq '.zip') {
+            if (Test-Path $toolInstallDir) {
+                Remove-Item -Path $toolInstallDir -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            New-Item -ItemType Directory -Path $toolInstallDir -Force | Out-Null
+            Expand-Archive-Compat -ArchivePath $installerFile -Destination $toolInstallDir
+
+            $exeDir = Get-ChildItem -Path $toolInstallDir -Filter '*.exe' -Recurse -ErrorAction SilentlyContinue |
+                Select-Object -First 1 -ExpandProperty DirectoryName
+            $pathToAdd = if ($exeDir) { $exeDir }
+                elseif (Test-Path (Join-Path $toolInstallDir 'bin')) { Join-Path $toolInstallDir 'bin' }
+                else { $toolInstallDir }
+
+            Add-DirectoryToSystemPath -Directory $pathToAdd | Out-Null
+            $proc = [PSCustomObject]@{ ExitCode = 0 }
         } else {
             $proc = Start-Process $installerFile -ArgumentList '/S' -Wait -PassThru
         }
@@ -262,13 +381,16 @@ function Install-ToolDirect {
         Update-EnvironmentPath
         if (Test-ToolOnPath $ToolName) { return $true }
 
+        if ($proc.ExitCode -ne 0) {
+            Write-WarnMsg "$ToolName installer exited with code $($proc.ExitCode)."
+        }
+
         if ($i -lt $maxAttempts) {
             Write-WarnMsg "$ToolName installation may have failed or been cancelled. Retrying..."
         }
     }
 
-    Write-ErrorMsg "Failed to install $ToolName after $maxAttempts attempts."
-    return $false
+    throw "Failed to install $ToolName after $maxAttempts attempts."
 }
 
 function Install-MissingTools {
@@ -294,7 +416,8 @@ function Install-MissingTools {
             Write-WarnMsg "Chocolatey unavailable; will attempt direct installers."
         }
     } else {
-        $chocoVersion = (& choco --version 2>&1 | Select-Object -First 1)
+        $chocoVersionResult = Invoke-NativeCommand -FilePath 'choco' -ArgumentList @('--version') -CaptureOutput
+        $chocoVersion = $chocoVersionResult.Output | Select-Object -First 1
         Write-Action "Chocolatey found (v$chocoVersion)"
     }
 
@@ -310,11 +433,16 @@ function Install-MissingTools {
 
         if (-not $installed) {
             Write-WarnMsg "choco install failed for '$tool'; trying direct installer..."
-            $installed = Install-ToolDirect -ToolName $tool
-            if ($installed) {
-                Write-StatusInstalled -Label $tool
-            } else {
+            try {
+                $installed = Install-ToolDirect -ToolName $tool
+                if ($installed) {
+                    Write-StatusInstalled -Label $tool
+                } else {
+                    Write-StatusFail -Label $tool -Detail 'installation failed'
+                }
+            } catch {
                 Write-StatusFail -Label $tool -Detail 'installation failed'
+                throw
             }
         }
 
@@ -346,7 +474,8 @@ function Assert-BuildTools {
         $resolvedTool = $candidates | Where-Object { Test-ToolOnPath $_ } | Select-Object -First 1
 
         if ($resolvedTool) {
-            $version = & $resolvedTool --version 2>&1 | Select-Object -First 1
+            $versionResult = Invoke-NativeCommand -FilePath $resolvedTool -ArgumentList @('--version') -CaptureOutput
+            $version = $versionResult.Output | Select-Object -First 1
             Write-StatusOk -Label $tool -Detail $version
             $found += $tool
         } else {
@@ -364,9 +493,13 @@ function Assert-BuildTools {
     $results = Install-MissingTools -MissingTools $missing
 
     # Verify all required tools are now available
-    $unavailable = $RequiredTools | Where-Object { -not (Test-ToolOnPath $_) }
+    $aliases = @{ python = @('python', 'python3'); pip = @('pip', 'pip3') }
+    $unavailable = $RequiredTools | Where-Object {
+        $candidates = if ($aliases.ContainsKey($_)) { $aliases[$_] } else { @($_) }
+        -not ($candidates | Where-Object { Test-ToolOnPath $_ } | Select-Object -First 1)
+    }
     if ($unavailable) {
-        Write-ErrorMsg "The following tools could not be installed: $($unavailable -join ', ')" -ExitCode 1
+        throw "The following tools could not be installed: $($unavailable -join ', ')"
     }
 
     return $results

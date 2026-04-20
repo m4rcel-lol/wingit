@@ -51,8 +51,47 @@ function Save-Registry {
         New-Item -ItemType Directory -Path $dir -Force | Out-Null
     }
 
-    $json = $Entries | ConvertTo-Json -Depth 5
+    $json = if ($Entries.Count -eq 0) {
+        '[]'
+    } else {
+        @($Entries) | ConvertTo-Json -Depth 6
+    }
     Set-Content -Path $path -Value $json -Encoding UTF8
+}
+
+function Get-RegistryEntry {
+    <#
+    .SYNOPSIS Returns a single registry entry for an owner/repo pair.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string] $Owner,
+        [Parameter(Mandatory)] [string] $Repo
+    )
+
+    return Read-Registry |
+        Where-Object { $_.owner -eq $Owner -and $_.repo -eq $Repo } |
+        Select-Object -First 1
+}
+
+function Get-PackagePathEntries {
+    <#
+    .SYNOPSIS Returns PATH entries associated with a package registry entry.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] [object] $Entry)
+
+    $paths = @()
+    if ($Entry.PSObject.Properties.Name -contains 'path_entries' -and $Entry.path_entries) {
+        $paths += @($Entry.path_entries)
+    }
+
+    if ($paths.Count -eq 0 -and $Entry.install_path) {
+        $paths += [System.IO.Path]::Combine($Entry.install_path, 'bin')
+        $paths += $Entry.install_path
+    }
+
+    return @($paths | Where-Object { $_ } | Select-Object -Unique)
 }
 
 function Add-RegistryEntry {
@@ -75,12 +114,23 @@ function Add-RegistryEntry {
         [string] $InstallPath = '',
         [string] $AssetName   = '',
         [string] $Architecture = '',
-        [bool] $IncludePrerelease = $false
+        [bool] $IncludePrerelease = $false,
+        [string[]] $PathEntries = @(),
+        [object] $Pinned = $null
     )
 
     $entries = Read-Registry
+    $existing = $entries | Where-Object { $_.owner -eq $Owner -and $_.repo -eq $Repo } | Select-Object -First 1
     # Remove any existing entry for this owner/repo
     $entries = @($entries | Where-Object { -not ($_.owner -eq $Owner -and $_.repo -eq $Repo) })
+
+    $pinnedValue = if ($null -ne $Pinned) {
+        [bool] $Pinned
+    } elseif ($existing -and $existing.PSObject.Properties.Name -contains 'pinned') {
+        [bool] $existing.pinned
+    } else {
+        $false
+    }
 
     $newEntry = [PSCustomObject]@{
         owner        = $Owner
@@ -92,10 +142,50 @@ function Add-RegistryEntry {
         asset_name   = $AssetName
         architecture = $Architecture
         include_prerelease = $IncludePrerelease
+        path_entries = @($PathEntries | Where-Object { $_ } | Select-Object -Unique)
+        pinned       = $pinnedValue
     }
 
     $entries += $newEntry
     Save-Registry -Entries $entries
+}
+
+function Set-PackagePinned {
+    <#
+    .SYNOPSIS Updates the pinned state for an installed package.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string] $Owner,
+        [Parameter(Mandatory)] [string] $Repo,
+        [Parameter(Mandatory)] [bool] $Pinned
+    )
+
+    $entries = Read-Registry
+    $updatedEntries = @()
+    $updatedEntry = $null
+
+    foreach ($entry in $entries) {
+        if ($entry.owner -eq $Owner -and $entry.repo -eq $Repo) {
+            $copy = $entry | Select-Object *
+            if ($copy.PSObject.Properties.Name -contains 'pinned') {
+                $copy.pinned = $Pinned
+            } else {
+                $copy | Add-Member -NotePropertyName 'pinned' -NotePropertyValue $Pinned
+            }
+            $updatedEntry = $copy
+            $updatedEntries += $copy
+        } else {
+            $updatedEntries += $entry
+        }
+    }
+
+    if (-not $updatedEntry) {
+        Write-ErrorMsg "Package '$Owner/$Repo' is not installed via WinGit." -ExitCode 1
+    }
+
+    Save-Registry -Entries $updatedEntries
+    return $updatedEntry
 }
 
 function Remove-RegistryEntry {
@@ -136,12 +226,13 @@ function Show-InstalledPackages {
     }
 
     $colPkg     = 30
-    $colVer     = 12
+    $colVer     = 14
     $colType    = 10
+    $colFlags   = 18
     $colDate    = 12
 
-    $header = 'Package'.PadRight($colPkg) + 'Version'.PadRight($colVer) + 'Type'.PadRight($colType) + 'Installed'
-    $divider = '-' * ($colPkg + $colVer + $colType + $colDate)
+    $header = 'Package'.PadRight($colPkg) + 'Version'.PadRight($colVer) + 'Type'.PadRight($colType) + 'Flags'.PadRight($colFlags) + 'Installed'
+    $divider = '-' * ($colPkg + $colVer + $colType + $colFlags + $colDate)
 
     Write-Host $header -ForegroundColor Cyan
     Write-Host $divider
@@ -150,11 +241,23 @@ function Show-InstalledPackages {
         $pkg  = "$($e.owner)/$($e.repo)".PadRight($colPkg)
         $ver  = ($e.version -replace '^v','').PadRight($colVer)
         $type = $e.install_type.PadRight($colType)
+        $flags = @()
+        if ($e.PSObject.Properties.Name -contains 'pinned' -and $e.pinned) {
+            $flags += 'pinned'
+        }
+        if ($e.PSObject.Properties.Name -contains 'include_prerelease' -and $e.include_prerelease) {
+            $flags += 'pre'
+        }
+        if ($e.PSObject.Properties.Name -contains 'architecture' -and $e.architecture) {
+            $flags += [string]$e.architecture
+        }
+        $flagText = if ($flags.Count -gt 0) { ($flags -join ',') } else { '-' }
+        $flagCol = $flagText.PadRight($colFlags)
         $date = if ($e.installed_at) {
             ([datetime]::Parse($e.installed_at, $null, [System.Globalization.DateTimeStyles]::RoundtripKind)).ToString('yyyy-MM-dd')
         } else { '?' }
 
-        Write-Host "$pkg$ver$type$date"
+        Write-Host "$pkg$ver$type$flagCol$date"
     }
 
     Write-Host ''
@@ -174,13 +277,14 @@ function Invoke-RemovePackage {
         [Parameter(Mandatory)] [string] $Repo
     )
 
-    $entry = Read-Registry | Where-Object { $_.owner -eq $Owner -and $_.repo -eq $Repo } | Select-Object -First 1
+    $entry = Get-RegistryEntry -Owner $Owner -Repo $Repo
 
     if (-not $entry) {
         Write-ErrorMsg "Package '$Owner/$Repo' is not installed via WinGit." -ExitCode 1
     }
 
     Write-Phase 'Removing' "$Owner/$Repo..."
+    $pathEntries = @(Get-PackagePathEntries -Entry $entry)
 
     # Try to run an uninstaller if found
     if ($entry.install_path -and (Test-Path $entry.install_path)) {
@@ -193,6 +297,10 @@ function Invoke-RemovePackage {
             Write-SubItem 'Deleting' $entry.install_path
             Remove-Item -Path $entry.install_path -Recurse -Force -ErrorAction SilentlyContinue
         }
+    }
+
+    foreach ($pathEntry in $pathEntries) {
+        Remove-DirectoryFromSystemPath -Directory $pathEntry | Out-Null
     }
 
     Remove-RegistryEntry -Owner $Owner -Repo $Repo | Out-Null

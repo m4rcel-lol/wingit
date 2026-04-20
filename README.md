@@ -8,18 +8,23 @@ it locally when no binary release exists.
 
 ## Features
 
-- **Release install** — downloads the best Windows binary asset (`.msi`, `.exe`, `.zip`, `.tar.gz`) from the latest GitHub release.
+- **Release install** — auto-detects `x64` or `arm64` and downloads the matching Windows binary asset (`.msi`, `.exe`, `.zip`, `.tar.gz`) from the latest GitHub release.
 - **Source build** — auto-detects the build system (CMake, Cargo, Go, npm, Python, Gradle, Maven, MSBuild, Meson, Make) and compiles from source.
 - **Update** — updates an installed package to the latest version, or updates all packages at once with `--all`.
+- **Package pinning** — pin packages to keep them out of `update --all` until you explicitly unpin them.
 - **Outdated report** — checks installed release packages and shows which ones have updates available.
 - **Info** — shows GitHub metadata and local install details for any package.
+- **Manifest export/import** — snapshot installed packages to JSON and recreate them on another machine.
 - **Search** — searches GitHub repositories and prints the top matches with stars, language, and URLs.
 - **Doctor** — checks environment readiness (core/build tools + GitHub API rate-limit status).
 - **Dependency bootstrapping** — installs missing build tools automatically via Chocolatey, with direct-installer fallback.
 - **rpm-ostree-style output** — structured, phase-labelled terminal output with progress bars and spinners.
 - **CMD & PowerShell** — works identically from both `cmd.exe` and `powershell.exe` (no execution-policy errors).
 - **Verbose mode** — pass `-v` or `--verbose` to see diagnostic URLs and extra detail.
+- **Source fallback** — if the machine architecture is not `x64` or `arm64`, WinGit skips release binaries and builds from source in `%TEMP%`.
+- **Forced source builds** — pass `--source` when you want to compile from source even if a release asset exists.
 - **Package registry** — tracks installed packages in `%PROGRAMDATA%\WinGit\registry.json`.
+- **PATH hygiene** — records package PATH entries so `remove` cleans them up instead of leaving stale entries behind.
 - **GitHub API auth** — set `GITHUB_TOKEN` to increase the API rate limit from 60 to 5,000 requests/hour.
 
 ---
@@ -45,9 +50,13 @@ wingit install <owner>/<repo>   Install a package from GitHub
 wingit update  <owner>/<repo>   Update an installed package to the latest version
 wingit update  --all            Update all packages installed by WinGit
 wingit remove  <owner>/<repo>   Remove an installed package
+wingit pin     <owner>/<repo>   Prevent update --all from upgrading a package
+wingit unpin   <owner>/<repo>   Re-enable update --all for a package
 wingit info    <owner>/<repo>   Show information about a package
 wingit list                     List packages installed by WinGit
 wingit outdated                 Show installed packages with newer releases available
+wingit export  [file]           Export installed packages to a manifest JSON file
+wingit import  <file>           Install packages from a manifest JSON file
 wingit search  <query>          Search GitHub repositories
 wingit doctor                   Run environment diagnostics
 wingit --version                Print WinGit version
@@ -58,8 +67,9 @@ wingit --help                   Show help
 
 ```
 -v, --verbose   Show verbose diagnostic output (API URLs, paths, extra detail)
---arch <x64|arm64|x86>   Prefer architecture-specific release assets
+--arch <x64|arm64|x86>   Override the auto-detected release architecture
 --pre-release   Allow prerelease versions in install and update checks
+--source   Force a source build even when a release asset exists
 ```
 
 ### Examples
@@ -71,6 +81,9 @@ wingit install cli/cli
 # Install Neovim (source build if no Windows binary found)
 wingit install neovim/neovim
 
+# Force a source build even when a release asset exists
+wingit install sharkdp/bat --source
+
 # Install ripgrep
 wingit install BurntSushi/ripgrep
 
@@ -79,6 +92,9 @@ wingit update cli/cli
 
 # Update all installed packages
 wingit update --all
+
+# Pin a package so update --all leaves it alone
+wingit pin cli/cli
 
 # Show package info (GitHub metadata + local install details)
 wingit info cli/cli
@@ -98,8 +114,37 @@ wingit doctor
 # Remove a package
 wingit remove cli/cli
 
+# Export installed packages to a reusable manifest
+wingit export packages.json
+
+# Install packages from a saved manifest
+wingit import packages.json
+
 # Install with verbose diagnostic output
 wingit install cli/cli -v
+```
+
+### Manifest format
+
+```json
+{
+  "manifest_version": 1,
+  "packages": [
+    {
+      "repository": "cli/cli",
+      "install_type": "release",
+      "architecture": "x64",
+      "include_prerelease": false,
+      "pinned": true
+    },
+    {
+      "repository": "BurntSushi/ripgrep",
+      "install_type": "source",
+      "include_prerelease": false,
+      "pinned": false
+    }
+  ]
+}
 ```
 
 ### Environment variables

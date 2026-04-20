@@ -171,11 +171,73 @@ function Write-ErrorLog {
     }
 }
 
+function Write-InstallFailureLog {
+    <#
+    .SYNOPSIS Writes a contextual error log for install/clone/build failures.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string] $Operation,
+        [string] $Package = '',
+        [string] $Message = '',
+        [string[]] $Details = @(),
+        [object] $ErrorRecord = $null
+    )
+
+    $lines = @(
+        "Operation : $Operation"
+    )
+
+    if ($Package) {
+        $lines += "Package   : $Package"
+    }
+
+    if ($Message) {
+        $lines += "Message   : $Message"
+    }
+
+    foreach ($detail in @($Details | Where-Object { $_ })) {
+        $lines += $detail
+    }
+
+    if ($ErrorRecord) {
+        $exceptionMessage = if ($ErrorRecord.Exception -and $ErrorRecord.Exception.Message) {
+            $ErrorRecord.Exception.Message
+        } else {
+            [string]$ErrorRecord
+        }
+        if ($exceptionMessage) {
+            $lines += "Exception : $exceptionMessage"
+        }
+        if ($ErrorRecord.ScriptStackTrace) {
+            $lines += ''
+            $lines += 'Script stack:'
+            $lines += $ErrorRecord.ScriptStackTrace
+        }
+    }
+
+    Write-ErrorLog -Message ($lines -join "`r`n")
+}
+
+function Test-InteractiveConsole {
+    <#
+    .SYNOPSIS Returns $true when WinGit is running in an interactive console.
+    #>
+    [CmdletBinding()]
+    param()
+
+    try {
+        return [Environment]::UserInteractive -and -not [Console]::IsInputRedirected
+    } catch {
+        return [Environment]::UserInteractive
+    }
+}
+
 function Write-ErrorMsg {
     <#
     .SYNOPSIS Writes a formatted error message and optionally exits.
     .PARAMETER Message The error message text.
-    .PARAMETER ExitCode If provided, saves an error log, pauses for input, then exits with this code.
+    .PARAMETER ExitCode If provided, pauses for input when interactive, then exits with this code.
     #>
     param(
         [Parameter(Mandatory)] [string] $Message,
@@ -183,9 +245,10 @@ function Write-ErrorMsg {
     )
     Write-Host "error: $Message" -ForegroundColor Red
     if ($ExitCode -ge 0) {
-        Write-ErrorLog -Message $Message
-        Write-Host ''
-        Read-Host 'Press Enter to close'
+        if (Test-InteractiveConsole) {
+            Write-Host ''
+            Read-Host 'Press Enter to close'
+        }
         exit $ExitCode
     }
 }
@@ -239,6 +302,48 @@ function Write-Trace {
     param([Parameter(Mandatory)] [string] $Message)
     if ($script:VerboseMode) {
         Write-Host "  [v] $Message" -ForegroundColor DarkGray
+    }
+}
+
+function Invoke-NativeCommand {
+    <#
+    .SYNOPSIS Runs a native command without turning stderr text into terminating PowerShell errors.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string] $FilePath,
+        [string[]] $ArgumentList = @(),
+        [switch] $CaptureOutput
+    )
+
+    $savedPreference = $ErrorActionPreference
+    $savedNativePreference = $null
+    $output = @()
+
+    try {
+        $ErrorActionPreference = 'Continue'
+        if ($PSVersionTable.PSVersion.Major -ge 7) {
+            $savedNativePreference = $PSNativeCommandUseErrorActionPreference
+            $PSNativeCommandUseErrorActionPreference = $false
+        }
+
+        if ($CaptureOutput) {
+            $output = @(& $FilePath @ArgumentList 2>&1)
+        } else {
+            & $FilePath @ArgumentList
+        }
+
+        $exitCode = if ($null -ne $LASTEXITCODE) { [int]$LASTEXITCODE } else { 0 }
+    } finally {
+        if ($PSVersionTable.PSVersion.Major -ge 7) {
+            $PSNativeCommandUseErrorActionPreference = $savedNativePreference
+        }
+        $ErrorActionPreference = $savedPreference
+    }
+
+    return [PSCustomObject]@{
+        ExitCode = $exitCode
+        Output   = @($output | ForEach-Object { [string]$_ })
     }
 }
 

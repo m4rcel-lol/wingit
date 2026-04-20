@@ -137,14 +137,15 @@ function Invoke-WebRequestDownload {
         [Parameter(Mandatory)] [string] $Destination
     )
 
-    $headers = @{ 'User-Agent' = 'WinGit/1.0' }
+    $userAgent = if ($script:Version) { "WinGit/$script:Version" } else { 'WinGit' }
+    $headers = @{ 'User-Agent' = $userAgent }
     if ($env:GITHUB_TOKEN -and $Url -like '*api.github.com*') {
         $headers['Authorization'] = "token $env:GITHUB_TOKEN"
     }
 
     # Stream download with manual progress tracking
     $request  = [System.Net.HttpWebRequest]::Create($Url)
-    $request.UserAgent = 'WinGit/1.0'
+    $request.UserAgent = $userAgent
     if ($env:GITHUB_TOKEN -and $Url -like '*api.github.com*') {
         $request.Headers['Authorization'] = "token $env:GITHUB_TOKEN"
     }
@@ -205,8 +206,8 @@ function Expand-Archive-Compat {
         # Use tar.exe (available on Windows 10 1803+)
         $tarPath = Get-Command 'tar.exe' -ErrorAction SilentlyContinue
         if ($tarPath) {
-            & tar.exe -xzf $ArchivePath -C $Destination
-            if ($LASTEXITCODE -ne 0) { throw "tar.exe extraction failed (exit $LASTEXITCODE)" }
+            $result = Invoke-NativeCommand -FilePath 'tar.exe' -ArgumentList @('-xzf', $ArchivePath, '-C', $Destination)
+            if ($result.ExitCode -ne 0) { throw "tar.exe extraction failed (exit $($result.ExitCode))" }
         } else {
             throw "tar.exe not found. Cannot extract .tar.gz archive."
         }

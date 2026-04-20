@@ -23,8 +23,9 @@ function Invoke-GitHubApi {
         [int] $MaxRetries = 3
     )
 
+    $userAgent = if ($script:Version) { "WinGit/$script:Version" } else { 'WinGit' }
     $headers = @{
-        'User-Agent' = 'WinGit/1.0'
+        'User-Agent' = $userAgent
         'Accept'     = 'application/vnd.github.v3+json'
     }
 
@@ -207,6 +208,12 @@ function Select-WindowsAsset {
             ($windowsKeywords | Where-Object { $name -like "*$_*" }) -and
             -not ($allArchTokens | Where-Object { $name -like "*$_*" })
         })
+    }
+
+    # When a specific architecture is requested, do not fall through to assets
+    # that explicitly target a different architecture.
+    if ($normalizedArch -and (-not $candidates -or $candidates.Count -eq 0)) {
+        return $null
     }
 
     # Stage 3: fallback to any Windows asset.

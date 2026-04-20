@@ -18,6 +18,8 @@ param(
     [Parameter(Position = 0)] [string] $Command  = '',
     [Parameter(Position = 1)] [string] $Target   = '',
     [switch] $v,
+    [Alias('version')] [switch] $ShowVersion,
+    [Alias('help', 'h', '?')] [switch] $ShowHelp,
     [Parameter(ValueFromRemainingArguments)] [object[]] $ExtraArgs
 )
 
@@ -28,6 +30,17 @@ $ErrorActionPreference = 'Stop'
 # Merge them back so the switch works identically on PS 5.1 and PS 7+.
 # Also detect -v / --verbose in ExtraArgs.
 $script:VerboseMode = $v.IsPresent
+
+if ($ShowVersion) {
+    $Command = '--version'
+    $Target = ''
+    $ExtraArgs = @()
+}
+elseif ($ShowHelp) {
+    $Command = '--help'
+    $Target = ''
+    $ExtraArgs = @()
+}
 
 if ($ExtraArgs -and $ExtraArgs.Count -gt 0) {
     $filteredArgs = [System.Collections.Generic.List[object]]::new()
@@ -55,6 +68,13 @@ if ($Command -and -not $Target -and $ExtraArgs -and $ExtraArgs.Count -gt 0) {
     $ExtraArgs = if ($ExtraArgs.Count -gt 1) { $ExtraArgs[1..($ExtraArgs.Count-1)] } else { @() }
 }
 
+switch ($Command.ToLower()) {
+    '-version' { $Command = '--version' }
+    'version'  { $Command = '--version' }
+    '-help'    { $Command = '--help' }
+    'help'     { $Command = '--help' }
+}
+
 # ── Load library modules ────────────────────────────────────────────────────
 $libDir = [System.IO.Path]::Combine($PSScriptRoot, 'lib')
 
@@ -67,13 +87,16 @@ $libDir = [System.IO.Path]::Combine($PSScriptRoot, 'lib')
 . "$libDir\elevation.ps1"
 
 # ── Version ─────────────────────────────────────────────────────────────────
-$script:Version = '2.0.0'
+$script:Version = '2.1.0'
 $script:PreferredArchitecture = ''
 $script:IncludePrerelease = $false
+$script:ForceSourceInstall = $false
 
 # ── Ctrl+C handler ──────────────────────────────────────────────────────────
 # Do not treat Ctrl+C as regular input; let PowerShell handle it normally.
-[Console]::TreatControlCAsInput = $false
+try {
+    [Console]::TreatControlCAsInput = $false
+} catch {}
 
 # ── Helper: parse owner/repo ─────────────────────────────────────────────────
 function Resolve-OwnerRepo {
@@ -89,11 +112,17 @@ function Resolve-InstallPreferences {
     param([object[]] $Arguments = @())
 
     $remaining = [System.Collections.Generic.List[object]]::new()
+    $script:PreferredArchitecture = ''
+    $script:IncludePrerelease = $false
+    $script:ForceSourceInstall = $false
+
     for ($i = 0; $i -lt $Arguments.Count; $i++) {
         $token = [string]$Arguments[$i]
         switch ($token.ToLower()) {
             '--pre-release' { $script:IncludePrerelease = $true; continue }
             '--prerelease'  { $script:IncludePrerelease = $true; continue }
+            '--source'      { $script:ForceSourceInstall = $true; continue }
+            '--build-from-source' { $script:ForceSourceInstall = $true; continue }
             '--arch' {
                 if (($i + 1) -ge $Arguments.Count) {
                     Write-ErrorMsg "Missing value for --arch. Allowed: x64, arm64, x86." -ExitCode 1
@@ -112,6 +141,80 @@ function Resolve-InstallPreferences {
     return if ($remaining.Count -gt 0) { $remaining.ToArray() } else { @() }
 }
 
+function Get-SystemReleaseArchitecture {
+    <#
+    .SYNOPSIS Detects whether the current Windows system is x64 or ARM64.
+    #>
+    [CmdletBinding()]
+    param()
+
+    try {
+        $architecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLower()
+    } catch {
+        $architecture = if ($env:PROCESSOR_ARCHITEW6432) {
+            $env:PROCESSOR_ARCHITEW6432.ToLower()
+        } elseif ($env:PROCESSOR_ARCHITECTURE) {
+            $env:PROCESSOR_ARCHITECTURE.ToLower()
+        } else {
+            ''
+        }
+    }
+
+    switch ($architecture) {
+        { $_ -in @('amd64', 'x86_64', 'x64') } { return 'x64' }
+        { $_ -in @('arm64', 'aarch64') }       { return 'arm64' }
+        default                                { return '' }
+    }
+}
+
+function Resolve-ReleaseArchitecturePreference {
+    <#
+    .SYNOPSIS Resolves which architecture should be used for release asset selection.
+    #>
+    [CmdletBinding()]
+    param([string] $RequestedArchitecture = '')
+
+    if ($RequestedArchitecture) {
+        return [PSCustomObject]@{
+            Architecture    = $RequestedArchitecture
+            DisplayLabel    = $RequestedArchitecture
+            AutoDetected    = $false
+            ReleaseEligible = $true
+        }
+    }
+
+    $detectedArchitecture = Get-SystemReleaseArchitecture
+    return [PSCustomObject]@{
+        Architecture    = $detectedArchitecture
+        DisplayLabel    = if ($detectedArchitecture) { $detectedArchitecture } else { 'unsupported' }
+        AutoDetected    = $true
+        ReleaseEligible = [bool]$detectedArchitecture
+    }
+}
+
+function Remove-StalePackagePathEntries {
+    param(
+        [Parameter(Mandatory)] [string] $Owner,
+        [Parameter(Mandatory)] [string] $Repo,
+        [string[]] $CurrentPathEntries = @()
+    )
+
+    $existingEntry = Get-RegistryEntry -Owner $Owner -Repo $Repo
+    if (-not $existingEntry) { return }
+
+    $currentLookup = @{}
+    foreach ($pathEntry in @($CurrentPathEntries | Where-Object { $_ })) {
+        $currentLookup[(Get-NormalizedDirectoryPath -Path $pathEntry)] = $true
+    }
+
+    foreach ($oldPathEntry in @(Get-PackagePathEntries -Entry $existingEntry)) {
+        $normalizedPath = Get-NormalizedDirectoryPath -Path $oldPathEntry
+        if (-not $currentLookup.ContainsKey($normalizedPath)) {
+            Remove-DirectoryFromSystemPath -Directory $oldPathEntry | Out-Null
+        }
+    }
+}
+
 # ── Subcommand: install ───────────────────────────────────────────────────────
 function Invoke-Install {
     param(
@@ -123,6 +226,11 @@ function Invoke-Install {
     $owner  = $parsed.Owner
     $repo   = $parsed.Repo
     $null   = Resolve-InstallPreferences -Arguments $Arguments
+    $releaseArchitecture = Resolve-ReleaseArchitecturePreference -RequestedArchitecture $script:PreferredArchitecture
+    if ($releaseArchitecture.ReleaseEligible) {
+        $script:PreferredArchitecture = $releaseArchitecture.Architecture
+    }
+    $elevationArgs = @('install', $PackageTarget) + @($Arguments | ForEach-Object { [string]$_ })
 
     Write-Header
 
@@ -146,8 +254,39 @@ function Invoke-Install {
     }
     Write-Blank
 
+    if ($script:ForceSourceInstall) {
+        Write-Phase 'Checking' 'releases...'
+        Write-SubItem 'Mode' 'forced source build (--source)'
+        Write-Blank
+        Assert-Elevation -ScriptPath $PSCommandPath -Arguments $elevationArgs
+        try {
+            Invoke-SourceInstall -Owner $owner -Repo $repo -DefaultBranch $repoInfo.default_branch
+        } catch {
+            Write-ErrorMsg $_.Exception.Message -ExitCode 1
+        }
+        return
+    }
+
     # ── Phase 1b: Release detection ─────────────────────────────────────────
     Write-Phase 'Checking' 'releases...'
+    if ($releaseArchitecture.AutoDetected) {
+        Write-SubItem 'Architecture' "$($releaseArchitecture.DisplayLabel) (auto-detected)"
+    } else {
+        Write-SubItem 'Architecture' "$($releaseArchitecture.DisplayLabel) (requested)"
+    }
+
+    if (-not $releaseArchitecture.ReleaseEligible) {
+        Write-SubItem 'Action' 'architecture unsupported for release install; building from source'
+        Write-Blank
+        Assert-Elevation -ScriptPath $PSCommandPath -Arguments $elevationArgs
+        try {
+            Invoke-SourceInstall -Owner $owner -Repo $repo -DefaultBranch $repoInfo.default_branch
+        } catch {
+            Write-ErrorMsg $_.Exception.Message -ExitCode 1
+        }
+        return
+    }
+
     Write-Trace "GET https://api.github.com/repos/$owner/$repo/releases/latest"
 
     $release    = Get-LatestRelease -Owner $owner -Repo $repo -IncludePrerelease:$script:IncludePrerelease
@@ -155,7 +294,7 @@ function Invoke-Install {
 
     if ($release -and $release.assets -and $release.assets.Count -gt 0) {
         Write-Trace "Found $($release.assets.Count) release asset(s); selecting best Windows match"
-        $assetToUse = Select-WindowsAsset -Assets $release.assets -Architecture $script:PreferredArchitecture
+        $assetToUse = Select-WindowsAsset -Assets $release.assets -Architecture $releaseArchitecture.Architecture
     }
 
     if ($assetToUse) {
@@ -165,8 +304,12 @@ function Invoke-Install {
         Write-SubItem 'Asset'   "$($assetToUse.name)  ($sizeStr)"
         Write-Blank
 
-        Assert-Elevation -ScriptPath $PSCommandPath -Arguments @('install', $PackageTarget)
-        Invoke-ReleaseInstall -Owner $owner -Repo $repo -Release $release -Asset $assetToUse
+        Assert-Elevation -ScriptPath $PSCommandPath -Arguments $elevationArgs
+        try {
+            Invoke-ReleaseInstall -Owner $owner -Repo $repo -Release $release -Asset $assetToUse
+        } catch {
+            Write-ErrorMsg $_.Exception.Message -ExitCode 1
+        }
 
     } else {
         if ($release) {
@@ -176,8 +319,12 @@ function Invoke-Install {
         }
         Write-Blank
 
-        Assert-Elevation -ScriptPath $PSCommandPath -Arguments @('install', $PackageTarget)
-        Invoke-SourceInstall -Owner $owner -Repo $repo -DefaultBranch $repoInfo.default_branch
+        Assert-Elevation -ScriptPath $PSCommandPath -Arguments $elevationArgs
+        try {
+            Invoke-SourceInstall -Owner $owner -Repo $repo -DefaultBranch $repoInfo.default_branch
+        } catch {
+            Write-ErrorMsg $_.Exception.Message -ExitCode 1
+        }
     }
 }
 
@@ -192,22 +339,23 @@ function Invoke-ReleaseInstall {
 
     $downloadDir  = [System.IO.Path]::Combine($env:TEMP, 'wingit', $Repo)
     $downloadPath = [System.IO.Path]::Combine($downloadDir, $Asset.name)
-
-    Write-Phase 'Downloading' $Asset.name
-    Write-Trace "URL: $($Asset.browser_download_url)"
-    Write-Trace "Destination: $downloadPath"
-    Invoke-Download -Url $Asset.browser_download_url -Destination $downloadPath
-    Write-Blank
-
-    Write-Phase 'Installing' $Asset.name
     $installDir = [System.IO.Path]::Combine($env:PROGRAMFILES, 'WinGit', 'packages', "$Owner-$Repo")
-    Write-Trace "Install directory: $installDir"
 
     $ext     = $Asset.name.ToLower()
     $success = $false
     $installDirCreated = $false
+    $pathEntries = @()
 
     try {
+        Write-Phase 'Downloading' $Asset.name
+        Write-Trace "URL: $($Asset.browser_download_url)"
+        Write-Trace "Destination: $downloadPath"
+        Invoke-Download -Url $Asset.browser_download_url -Destination $downloadPath
+        Write-Blank
+
+        Write-Phase 'Installing' $Asset.name
+        Write-Trace "Install directory: $installDir"
+
         if ($ext.EndsWith('.msi')) {
             Write-SubItem 'Method' 'msiexec /quiet'
             $proc = Start-Process 'msiexec.exe' `
@@ -243,17 +391,22 @@ function Invoke-ReleaseInstall {
             if ($innerInstaller) {
                 Write-SubItem 'Running' $innerInstaller.Name
                 if ($innerInstaller.Extension -eq '.msi') {
-                    Start-Process 'msiexec.exe' -ArgumentList "/i `"$($innerInstaller.FullName)`" /quiet /norestart" -Wait
+                    $proc = Start-Process 'msiexec.exe' -ArgumentList "/i `"$($innerInstaller.FullName)`" /quiet /norestart" -Wait -PassThru
+                    if ($proc.ExitCode -ne 0) { throw "inner msiexec exited with code $($proc.ExitCode)" }
                 } else {
-                    Start-Process $innerInstaller.FullName -ArgumentList '/S' -Wait
+                    $proc = Start-Process $innerInstaller.FullName -ArgumentList '/S' -Wait -PassThru
+                    if ($proc.ExitCode -ne 0) { throw "inner installer exited with code $($proc.ExitCode)" }
                 }
             } else {
                 # No installer found — add extract dir to system PATH
                 $binDir = [System.IO.Path]::Combine($installDir, 'bin')
                 $pathToAdd = if (Test-Path $binDir) { $binDir } else { $installDir }
                 Add-DirectoryToSystemPath -Directory $pathToAdd
+                $pathEntries += $pathToAdd
             }
             $success = $true
+        } else {
+            throw "Unsupported release asset type: $($Asset.name)"
         }
     } catch {
         if ($installDirCreated -and (Test-Path $installDir)) {
@@ -261,19 +414,41 @@ function Invoke-ReleaseInstall {
             Remove-Item -Path $installDir -Recurse -Force -ErrorAction SilentlyContinue
         }
         Write-WarnMsg  "Downloaded file preserved at: $downloadPath"
-        Write-ErrorMsg "Installation failed: $($_.Exception.Message)" -ExitCode 1
+        Write-InstallFailureLog -Operation 'release install' -Package "$Owner/$Repo" `
+            -Message 'Installing a release asset failed.' `
+            -Details @(
+                "Asset     : $($Asset.name)",
+                "Release   : $($Release.tag_name)",
+                "URL       : $($Asset.browser_download_url)",
+                "Download  : $downloadPath",
+                "Install   : $installDir"
+            ) `
+            -ErrorRecord $_
+        throw "Installation failed: $($_.Exception.Message)"
     }
 
     if (-not $success) {
-        Write-ErrorMsg 'Installation failed.' -ExitCode 1
+        Write-InstallFailureLog -Operation 'release install' -Package "$Owner/$Repo" `
+            -Message 'Installer did not report success.' `
+            -Details @(
+                "Asset     : $($Asset.name)",
+                "Release   : $($Release.tag_name)",
+                "URL       : $($Asset.browser_download_url)",
+                "Download  : $downloadPath",
+                "Install   : $installDir"
+            )
+        throw 'Installation failed.'
     }
+
+    Remove-StalePackagePathEntries -Owner $Owner -Repo $Repo -CurrentPathEntries $pathEntries
 
     # Record in registry
     Add-RegistryEntry -Owner $Owner -Repo $Repo `
         -Version $Release.tag_name -InstallType 'release' `
         -InstallPath $installDir -AssetName $Asset.name `
         -Architecture $script:PreferredArchitecture `
-        -IncludePrerelease $script:IncludePrerelease
+        -IncludePrerelease $script:IncludePrerelease `
+        -PathEntries $pathEntries
 
     # Cleanup temp files
     Remove-Item -Path $downloadPath -Force -ErrorAction SilentlyContinue
@@ -289,86 +464,119 @@ function Invoke-SourceInstall {
         [string] $DefaultBranch = 'main'
     )
 
-    $srcDir    = [System.IO.Path]::Combine($env:TEMP, 'wingit', "$Repo-src")
+    $workRoot   = [System.IO.Path]::Combine($env:TEMP, 'wingit', "$Owner-$Repo-source")
+    $srcDir     = [System.IO.Path]::Combine($workRoot, 'src')
+    $extractTemp = [System.IO.Path]::Combine($workRoot, 'extract')
+    $zipPath    = [System.IO.Path]::Combine($workRoot, "$Repo-src.zip")
     $installDir = [System.IO.Path]::Combine($env:PROGRAMFILES, 'WinGit', 'packages', "$Owner-$Repo")
+    $cloneUrl   = "https://github.com/$Owner/${Repo}.git"
+    $activeSourceUrl = $cloneUrl
 
-    if (Test-Path $srcDir) {
-        Write-SubItem 'Cleanup' "Removing existing source directory: $srcDir"
-        Remove-Item -Path $srcDir -Recurse -Force -ErrorAction SilentlyContinue
+    if (Test-Path $workRoot) {
+        Write-SubItem 'Cleanup' "Removing existing source workspace: $workRoot"
+        Remove-Item -Path $workRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
 
-    Write-Phase 'Fetching' 'source...'
-
-    if (Test-ToolOnPath 'git') {
-        $cloneUrl = "https://github.com/$Owner/${Repo}.git"
-        Write-SubItem 'Cloning' "$cloneUrl  ->  $srcDir"
-        Write-Trace "git clone --depth=1 $cloneUrl $srcDir"
-        # Temporarily lower ErrorActionPreference so that git's informational
-        # stderr lines (e.g. "Cloning into '...'") do not raise a
-        # NativeCommandError and terminate the script under PS 5.1.
-        $savedPref = $ErrorActionPreference
-        $ErrorActionPreference = 'Continue'
-        & git clone --depth=1 $cloneUrl $srcDir 2>&1 | ForEach-Object { Write-Host "  $_" }
-        $cloneExit = $LASTEXITCODE
-        $ErrorActionPreference = $savedPref
-        if ($cloneExit -ne 0) {
-            if (Test-Path $srcDir) {
-                Write-SubItem 'Cleanup' "Removing failed clone directory: $srcDir"
-                Remove-Item -Path $srcDir -Recurse -Force -ErrorAction SilentlyContinue
-            }
-            Write-ErrorMsg "git clone failed." -ExitCode 1
-        }
-    } else {
-        # Fallback: download zip archive. Use the repo's default branch.
-        $zipUrl  = "https://github.com/$Owner/$Repo/archive/refs/heads/$DefaultBranch.zip"
-        $zipPath = [System.IO.Path]::Combine($env:TEMP, 'wingit', "$Repo-src.zip")
-
-        Write-SubItem 'Downloading' $zipUrl
-        Write-Trace "Destination: $zipPath"
-        try {
-            Invoke-Download -Url $zipUrl -Destination $zipPath
-        } catch {
-            # Fall back to the other common default branch name
-            $fallback = if ($DefaultBranch -eq 'main') { 'master' } else { 'main' }
-            $zipUrl   = "https://github.com/$Owner/$Repo/archive/refs/heads/$fallback.zip"
-            Write-SubItem 'Retrying' $zipUrl
-            Invoke-Download -Url $zipUrl -Destination $zipPath
-        }
-
-        Write-SubItem 'Extracting' $zipPath
-        $extractTemp = [System.IO.Path]::Combine($env:TEMP, 'wingit', "$Repo-extract")
-        Expand-Archive-Compat -ArchivePath $zipPath -Destination $extractTemp
-
-        # GitHub zip archives contain a top-level directory like repo-main/
-        $innerDir = Get-ChildItem -Path $extractTemp -Directory | Select-Object -First 1
-        if ($innerDir) {
-            Move-Item -Path $innerDir.FullName -Destination $srcDir -Force
-        } else {
-            $srcDir = $extractTemp
-        }
-
-        Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
-    }
-
-    Write-Blank
+    New-Item -ItemType Directory -Path $workRoot -Force | Out-Null
 
     try {
-        Invoke-SourceBuild -Owner $Owner -Repo $Repo -SourceDir $srcDir -InstallDir $installDir
-    } catch {
-        if (Test-Path $installDir) {
-            Write-SubItem 'Cleanup' "Removing incomplete install directory: $installDir"
-            Remove-Item -Path $installDir -Recurse -Force -ErrorAction SilentlyContinue
+        Write-Phase 'Fetching' 'source...'
+
+        try {
+            if (Test-ToolOnPath 'git') {
+                Write-SubItem 'Cloning' "$cloneUrl  ->  $srcDir"
+                Write-Trace "git clone --depth=1 $cloneUrl $srcDir"
+                $cloneResult = Invoke-NativeCommand -FilePath 'git' -ArgumentList @('clone', '--depth=1', $cloneUrl, $srcDir) -CaptureOutput
+                if ($cloneResult.Output.Count -gt 0) {
+                    Write-IndentedBlock ($cloneResult.Output -join "`n")
+                }
+                if ($cloneResult.ExitCode -ne 0) {
+                    throw "git clone failed (exit $($cloneResult.ExitCode))"
+                }
+            } else {
+                # Fallback: download zip archive. Use the repo's default branch.
+                $activeSourceUrl = "https://github.com/$Owner/$Repo/archive/refs/heads/$DefaultBranch.zip"
+                Write-SubItem 'Downloading' $activeSourceUrl
+                Write-Trace "Destination: $zipPath"
+                try {
+                    Invoke-Download -Url $activeSourceUrl -Destination $zipPath
+                } catch {
+                    $fallbackBranch = if ($DefaultBranch -eq 'main') { 'master' } else { 'main' }
+                    $activeSourceUrl = "https://github.com/$Owner/$Repo/archive/refs/heads/$fallbackBranch.zip"
+                    Write-SubItem 'Retrying' $activeSourceUrl
+                    Invoke-Download -Url $activeSourceUrl -Destination $zipPath
+                }
+
+                if (Test-Path $extractTemp) {
+                    Remove-Item -Path $extractTemp -Recurse -Force -ErrorAction SilentlyContinue
+                }
+
+                Write-SubItem 'Extracting' $zipPath
+                Expand-Archive-Compat -ArchivePath $zipPath -Destination $extractTemp
+
+                # GitHub zip archives contain a top-level directory like repo-main/
+                $innerDir = Get-ChildItem -Path $extractTemp -Directory | Select-Object -First 1
+                if (-not $innerDir) {
+                    throw 'Downloaded source archive did not contain a top-level source directory.'
+                }
+
+                Move-Item -Path $innerDir.FullName -Destination $srcDir -Force
+            }
+        } catch {
+            if (Test-Path $srcDir) {
+                Write-SubItem 'Cleanup' "Removing failed source directory: $srcDir"
+                Remove-Item -Path $srcDir -Recurse -Force -ErrorAction SilentlyContinue
+            }
+
+            Write-InstallFailureLog -Operation 'source fetch' -Package "$Owner/$Repo" `
+                -Message 'Fetching source code failed.' `
+                -Details @(
+                    "Source    : $activeSourceUrl",
+                    "Workspace : $workRoot",
+                    "SourceDir : $srcDir",
+                    "Archive   : $zipPath",
+                    "Branch    : $DefaultBranch"
+                ) `
+                -ErrorRecord $_
+            throw "Source fetch failed: $($_.Exception.Message)"
         }
-        throw
+
+        Write-Blank
+
+        $pathEntries = @()
+        try {
+            $pathEntries = @(Invoke-SourceBuild -Owner $Owner -Repo $Repo -SourceDir $srcDir -InstallDir $installDir)
+        } catch {
+            if (Test-Path $installDir) {
+                Write-SubItem 'Cleanup' "Removing incomplete install directory: $installDir"
+                Remove-Item -Path $installDir -Recurse -Force -ErrorAction SilentlyContinue
+            }
+
+            Write-InstallFailureLog -Operation 'source build' -Package "$Owner/$Repo" `
+                -Message 'Building from source failed.' `
+                -Details @(
+                    "SourceDir : $srcDir",
+                    "Install   : $installDir"
+                ) `
+                -ErrorRecord $_
+            throw "Source build failed: $($_.Exception.Message)"
+        }
+
+        Remove-StalePackagePathEntries -Owner $Owner -Repo $Repo -CurrentPathEntries $pathEntries
+
+        Add-RegistryEntry -Owner $Owner -Repo $Repo `
+            -Version 'source' -InstallType 'source' `
+            -InstallPath $installDir `
+            -Architecture $script:PreferredArchitecture `
+            -IncludePrerelease $script:IncludePrerelease `
+            -PathEntries $pathEntries
+
+        Write-Complete -Package "$Owner/$Repo" -InstallType 'source'
+    } finally {
+        if (Test-Path $workRoot) {
+            Remove-Item -Path $workRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
-
-    Add-RegistryEntry -Owner $Owner -Repo $Repo `
-        -Version 'source' -InstallType 'source' `
-        -InstallPath $installDir `
-        -Architecture $script:PreferredArchitecture `
-        -IncludePrerelease $script:IncludePrerelease
-
-    Write-Complete -Package "$Owner/$Repo" -InstallType 'source'
 }
 
 # ── Subcommand: update ────────────────────────────────────────────────────────
@@ -391,10 +599,17 @@ function Invoke-Update {
         $updated = 0
         $upToDate = 0
         $failed = 0
+        $pinned = 0
 
         foreach ($entry in $entries) {
             $pkg = "$($entry.owner)/$($entry.repo)"
             Write-Phase 'Checking' "$pkg..."
+            if ($entry.PSObject.Properties.Name -contains 'pinned' -and $entry.pinned) {
+                Write-SubItem 'Pinned' 'skipping during update --all'
+                $pinned++
+                Write-Blank
+                continue
+            }
             $result = Update-SinglePackage -Owner $entry.owner -Repo $entry.repo `
                 -CurrentVersion $entry.version -InstallType $entry.install_type `
                 -Architecture $entry.architecture -IncludePrerelease ([bool]$entry.include_prerelease)
@@ -409,6 +624,7 @@ function Invoke-Update {
         Write-Host 'Update summary:' -ForegroundColor Cyan
         if ($updated -gt 0)   { Write-Host "  $updated package(s) updated."    -ForegroundColor Green }
         if ($upToDate -gt 0)  { Write-Host "  $upToDate package(s) up to date." -ForegroundColor Gray }
+        if ($pinned -gt 0)    { Write-Host "  $pinned package(s) skipped because they are pinned." -ForegroundColor DarkYellow }
         if ($failed -gt 0)    { Write-Host "  $failed package(s) failed."       -ForegroundColor Red }
         Write-Blank
         return
@@ -428,6 +644,8 @@ function Invoke-Update {
     if (-not $entry) {
         Write-WarnMsg "'$PackageTarget' is not in the WinGit registry. Running fresh install..."
         Write-Blank
+    } elseif ($entry.PSObject.Properties.Name -contains 'pinned' -and $entry.pinned) {
+        Write-SubItem 'Pinned' 'manual update requested; continuing'
     }
 
     Assert-Elevation -ScriptPath $PSCommandPath -Arguments @('update', $PackageTarget)
@@ -536,10 +754,14 @@ function Update-SinglePackage {
     try {
         Write-Trace "GET https://api.github.com/repos/$Owner/$Repo/releases/latest"
         $release = Get-LatestRelease -Owner $Owner -Repo $Repo -IncludePrerelease:$IncludePrerelease
+        $releaseArchitecture = Resolve-ReleaseArchitecturePreference -RequestedArchitecture $Architecture
 
-        if ($InstallType -eq 'source' -or (-not $release)) {
+        if ($InstallType -eq 'source' -or (-not $release) -or (-not $releaseArchitecture.ReleaseEligible)) {
             # Source installs: always re-fetch and rebuild
             Write-SubItem 'Type'    'source build'
+            if (-not $releaseArchitecture.ReleaseEligible) {
+                Write-SubItem 'Architecture' "$($releaseArchitecture.DisplayLabel) (source fallback)"
+            }
             Write-SubItem 'Action' 're-building from latest source'
             $repoInfo = Get-RepoInfo -Owner $Owner -Repo $Repo
             Invoke-SourceInstall -Owner $Owner -Repo $Repo -DefaultBranch ($repoInfo.default_branch)
@@ -557,7 +779,7 @@ function Update-SinglePackage {
 
         $assetToUse = $null
         if ($release.assets -and $release.assets.Count -gt 0) {
-            $assetToUse = Select-WindowsAsset -Assets $release.assets -Architecture $Architecture
+            $assetToUse = Select-WindowsAsset -Assets $release.assets -Architecture $releaseArchitecture.Architecture
         }
 
         if ($assetToUse) {
@@ -600,6 +822,7 @@ function Invoke-Outdated {
                 installed  = if ($entry.version) { $entry.version } else { '(unknown)' }
                 latest     = $release.tag_name
                 prerelease = [bool]$release.prerelease
+                pinned     = [bool]$entry.pinned
             }
         }
     }
@@ -614,6 +837,9 @@ function Invoke-Outdated {
         Write-Host "  $($pkg.package)" -ForegroundColor Cyan
         Write-SubItem 'Installed' $pkg.installed
         Write-SubItem 'Latest' $pkg.latest
+        if ($pkg.pinned) {
+            Write-SubItem 'Pinned' 'yes'
+        }
         if ($pkg.prerelease) {
             Write-SubItem 'Channel' 'pre-release'
         }
@@ -634,7 +860,7 @@ function Invoke-Info {
     Write-Blank
 
     # Registry entry
-    $entry = Read-Registry | Where-Object { $_.owner -eq $owner -and $_.repo -eq $repo } | Select-Object -First 1
+    $entry = Get-RegistryEntry -Owner $owner -Repo $repo
     if ($entry) {
         Write-Host '  Installed (WinGit registry):' -ForegroundColor Cyan
         $ver  = if ($entry.version) { $entry.version } else { 'unknown' }
@@ -651,11 +877,17 @@ function Invoke-Info {
         if ($entry.asset_name) {
             Write-SubItem 'Asset' $entry.asset_name
         }
+        if ($entry.PSObject.Properties.Name -contains 'path_entries' -and $entry.path_entries) {
+            Write-SubItem 'PATH entries' ($entry.path_entries -join ', ')
+        }
         if ($entry.architecture) {
             Write-SubItem 'Architecture' $entry.architecture
         }
         if ($entry.PSObject.Properties.Name -contains 'include_prerelease' -and $entry.include_prerelease) {
             Write-SubItem 'Release channel' 'pre-release enabled'
+        }
+        if ($entry.PSObject.Properties.Name -contains 'pinned' -and $entry.pinned) {
+            Write-SubItem 'Pinned' 'yes'
         }
     } else {
         Write-Host '  Not installed via WinGit.' -ForegroundColor DarkGray
@@ -717,6 +949,178 @@ function Invoke-List {
     Show-InstalledPackages
 }
 
+function Resolve-UserPath {
+    param(
+        [string] $Path = '',
+        [string] $DefaultLeaf = ''
+    )
+
+    $candidate = if ($Path) {
+        if ([System.IO.Path]::IsPathRooted($Path)) {
+            $Path
+        } else {
+            Join-Path (Get-Location).Path $Path
+        }
+    } elseif ($DefaultLeaf) {
+        Join-Path (Get-Location).Path $DefaultLeaf
+    } else {
+        (Get-Location).Path
+    }
+
+    return [System.IO.Path]::GetFullPath($candidate)
+}
+
+function Invoke-Export {
+    param([string] $ManifestPath = '')
+
+    Write-Header
+    Write-Phase 'Exporting' 'package manifest...'
+
+    $resolvedPath = Resolve-UserPath -Path $ManifestPath -DefaultLeaf 'wingit-packages.json'
+    $dir = [System.IO.Path]::GetDirectoryName($resolvedPath)
+    if ($dir -and -not (Test-Path $dir)) {
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    }
+
+    $entries = @(Read-Registry | Sort-Object owner, repo)
+    $packages = @(
+        foreach ($entry in $entries) {
+            [PSCustomObject]@{
+                repository         = "$($entry.owner)/$($entry.repo)"
+                install_type       = if ($entry.install_type) { $entry.install_type } else { 'release' }
+                architecture       = if ($entry.architecture) { $entry.architecture } else { $null }
+                include_prerelease = [bool]$entry.include_prerelease
+                pinned             = [bool]$entry.pinned
+            }
+        }
+    )
+
+    $manifest = [PSCustomObject]@{
+        manifest_version = 1
+        generated_at     = ([datetime]::UtcNow.ToString('o'))
+        generated_by     = "WinGit $script:Version"
+        package_count    = $packages.Count
+        packages         = @($packages)
+    }
+
+    $manifest | ConvertTo-Json -Depth 6 | Set-Content -Path $resolvedPath -Encoding UTF8
+
+    Write-SubItem 'Path' $resolvedPath
+    Write-SubItem 'Packages' $packages.Count
+    Write-Blank
+}
+
+function Invoke-Import {
+    param([Parameter(Mandatory)] [string] $ManifestPath)
+
+    Write-Header
+    Write-Phase 'Importing' 'package manifest...'
+
+    $resolvedPath = Resolve-UserPath -Path $ManifestPath
+    if (-not (Test-Path $resolvedPath)) {
+        Write-ErrorMsg "Manifest file not found: $resolvedPath" -ExitCode 1
+    }
+
+    Write-SubItem 'Path' $resolvedPath
+
+    try {
+        $manifest = Get-Content -Path $resolvedPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    } catch {
+        Write-ErrorMsg "Could not parse manifest file '$resolvedPath': $($_.Exception.Message)" -ExitCode 1
+    }
+
+    $packages = if ($manifest -and $manifest.PSObject.Properties.Name -contains 'packages') {
+        @($manifest.packages)
+    } else {
+        @($manifest)
+    }
+
+    if (-not $packages -or $packages.Count -eq 0) {
+        Write-WarnMsg 'Manifest does not contain any packages.'
+        Write-Blank
+        return
+    }
+
+    Assert-Elevation -ScriptPath $PSCommandPath -Arguments @('import', $resolvedPath)
+
+    $installed = 0
+    $skipped = 0
+
+    foreach ($package in $packages) {
+        $packageTarget = if ($package.PSObject.Properties.Name -contains 'repository') {
+            [string]$package.repository
+        } else {
+            ''
+        }
+
+        if (-not $packageTarget) {
+            Write-ErrorMsg 'Manifest entries must define a repository value in <owner>/<repo> format.' -ExitCode 1
+        }
+
+        $parsed = Resolve-OwnerRepo -PackageTarget $packageTarget
+        $existing = Get-RegistryEntry -Owner $parsed.Owner -Repo $parsed.Repo
+
+        if ($existing) {
+            Write-Phase 'Skipping' "$packageTarget..."
+            Write-SubItem 'Status' 'already installed'
+            if ($package.PSObject.Properties.Name -contains 'pinned') {
+                Set-PackagePinned -Owner $parsed.Owner -Repo $parsed.Repo -Pinned ([bool]$package.pinned) | Out-Null
+                Write-SubItem 'Pinned' $(if ([bool]$package.pinned) { 'yes' } else { 'no' })
+            }
+            Write-Blank
+            $skipped++
+            continue
+        }
+
+        $installArgs = @()
+        if ($package.PSObject.Properties.Name -contains 'install_type' -and [string]$package.install_type -eq 'source') {
+            $installArgs += '--source'
+        }
+        if ($package.PSObject.Properties.Name -contains 'architecture' -and $package.architecture) {
+            $installArgs += '--arch'
+            $installArgs += [string]$package.architecture
+        }
+        if ($package.PSObject.Properties.Name -contains 'include_prerelease' -and [bool]$package.include_prerelease) {
+            $installArgs += '--pre-release'
+        }
+
+        Invoke-Install -PackageTarget $packageTarget -Arguments $installArgs
+        if ($package.PSObject.Properties.Name -contains 'pinned' -and [bool]$package.pinned) {
+            Set-PackagePinned -Owner $parsed.Owner -Repo $parsed.Repo -Pinned $true | Out-Null
+        }
+        $installed++
+    }
+
+    Write-Host 'Import summary:' -ForegroundColor Cyan
+    if ($installed -gt 0) { Write-Host "  $installed package(s) installed." -ForegroundColor Green }
+    if ($skipped -gt 0) { Write-Host "  $skipped package(s) already present." -ForegroundColor Gray }
+    Write-Blank
+}
+
+function Invoke-Pin {
+    param([Parameter(Mandatory)] [string] $PackageTarget)
+
+    $parsed = Resolve-OwnerRepo -PackageTarget $PackageTarget
+    Write-Header
+    Assert-Elevation -ScriptPath $PSCommandPath -Arguments @('pin', $PackageTarget)
+    Write-Phase 'Pinning' "$PackageTarget..."
+    Set-PackagePinned -Owner $parsed.Owner -Repo $parsed.Repo -Pinned $true | Out-Null
+    Write-SubItem 'Status' 'pinned'
+    Write-Blank
+}
+
+function Invoke-Unpin {
+    param([Parameter(Mandatory)] [string] $PackageTarget)
+
+    $parsed = Resolve-OwnerRepo -PackageTarget $PackageTarget
+    Write-Header
+    Assert-Elevation -ScriptPath $PSCommandPath -Arguments @('unpin', $PackageTarget)
+    Write-Phase 'Unpinning' "$PackageTarget..."
+    Set-PackagePinned -Owner $parsed.Owner -Repo $parsed.Repo -Pinned $false | Out-Null
+    Write-SubItem 'Status' 'updates re-enabled'
+    Write-Blank
+}
+
 # ── Subcommand: remove ────────────────────────────────────────────────────────
 function Invoke-Remove {
     param([string] $PackageTarget)
@@ -736,9 +1140,13 @@ Usage:
   wingit update  <owner>/<repo>   Update an installed package to the latest version
   wingit update  --all            Update all packages installed by WinGit
   wingit remove  <owner>/<repo>   Remove an installed package
+  wingit pin     <owner>/<repo>   Prevent update --all from upgrading a package
+  wingit unpin   <owner>/<repo>   Re-enable update --all for a package
   wingit info    <owner>/<repo>   Show information about a package
   wingit list                     List packages installed by WinGit
   wingit outdated                 Show installed packages with newer releases available
+  wingit export  [file]           Export installed packages to a manifest JSON file
+  wingit import  <file>           Install packages from a manifest JSON file
   wingit search  <query>          Search GitHub repositories
   wingit doctor                   Run environment diagnostics
   wingit --version                Print WinGit version
@@ -746,15 +1154,20 @@ Usage:
 
 Options:
   -v, --verbose                   Show verbose diagnostic output
-  --arch <x64|arm64|x86>          Prefer architecture-specific release assets
+  --arch <x64|arm64|x86>          Override the auto-detected release architecture
   --pre-release                   Allow prerelease versions in install/update checks
+  --source                        Force a source build even when a release asset exists
 
 Examples:
   wingit install cli/cli
+  wingit install sharkdp/bat --source
   wingit install neovim/neovim
   wingit install BurntSushi/ripgrep
   wingit update  cli/cli
   wingit update  --all
+  wingit pin     cli/cli
+  wingit export  packages.json
+  wingit import  packages.json
   wingit info    cli/cli
   wingit outdated
   wingit search  terminal
@@ -782,6 +1195,18 @@ switch ($Command.ToLower()) {
         }
         Invoke-Remove -PackageTarget $Target
     }
+    'pin' {
+        if (-not $Target) {
+            Write-ErrorMsg "Missing target. Usage: wingit pin <owner>/<repo>" -ExitCode 1
+        }
+        Invoke-Pin -PackageTarget $Target
+    }
+    'unpin' {
+        if (-not $Target) {
+            Write-ErrorMsg "Missing target. Usage: wingit unpin <owner>/<repo>" -ExitCode 1
+        }
+        Invoke-Unpin -PackageTarget $Target
+    }
     'info' {
         if (-not $Target) {
             Write-ErrorMsg "Missing target. Usage: wingit info <owner>/<repo>" -ExitCode 1
@@ -793,6 +1218,15 @@ switch ($Command.ToLower()) {
     }
     'outdated' {
         Invoke-Outdated
+    }
+    'export' {
+        Invoke-Export -ManifestPath $Target
+    }
+    'import' {
+        if (-not $Target) {
+            Write-ErrorMsg "Missing file. Usage: wingit import <file>" -ExitCode 1
+        }
+        Invoke-Import -ManifestPath $Target
     }
     'search' {
         if (-not $Target) {
