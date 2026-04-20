@@ -107,12 +107,28 @@ function Get-LatestRelease {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)] [string] $Owner,
-        [Parameter(Mandatory)] [string] $Repo
+        [Parameter(Mandatory)] [string] $Repo,
+        [switch] $IncludePrerelease
     )
 
-    $url     = "https://api.github.com/repos/$Owner/$Repo/releases/latest"
-    $release = Invoke-GitHubApi -Url $url
-    return $release
+    if (-not $IncludePrerelease) {
+        $url     = "https://api.github.com/repos/$Owner/$Repo/releases/latest"
+        $release = Invoke-GitHubApi -Url $url
+        return $release
+    }
+
+    # GitHub's /latest endpoint excludes prereleases.
+    # For prerelease-aware mode, read the releases list and pick the newest
+    # non-draft release (which may be prerelease).
+    $url = "https://api.github.com/repos/$Owner/$Repo/releases?per_page=20"
+    $releases = Invoke-GitHubApi -Url $url
+    if (-not $releases) { return $null }
+
+    $candidate = $releases |
+        Where-Object { -not $_.draft } |
+        Sort-Object { [datetime]$_.published_at } -Descending |
+        Select-Object -First 1
+    return $candidate
 }
 
 function Search-GitHubRepositories {
