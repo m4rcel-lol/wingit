@@ -12,6 +12,8 @@ it locally when no binary release exists.
 - **Source build** — auto-detects the build system (CMake, Cargo, Go, npm, Python, Gradle, Maven, MSBuild, Meson, Make) and compiles from source.
 - **Update** — updates an installed package to the latest version, or updates all packages at once with `--all`.
 - **Info** — shows GitHub metadata and local install details for any package.
+- **Search** — searches GitHub repositories and prints the top matches with stars, language, and URLs.
+- **Doctor** — checks environment readiness (core/build tools + GitHub API rate-limit status).
 - **Dependency bootstrapping** — installs missing build tools automatically via Chocolatey, with direct-installer fallback.
 - **rpm-ostree-style output** — structured, phase-labelled terminal output with progress bars and spinners.
 - **CMD & PowerShell** — works identically from both `cmd.exe` and `powershell.exe` (no execution-policy errors).
@@ -44,6 +46,8 @@ wingit update  --all            Update all packages installed by WinGit
 wingit remove  <owner>/<repo>   Remove an installed package
 wingit info    <owner>/<repo>   Show information about a package
 wingit list                     List packages installed by WinGit
+wingit search  <query>          Search GitHub repositories
+wingit doctor                   Run environment diagnostics
 wingit --version                Print WinGit version
 wingit --help                   Show help
 ```
@@ -77,6 +81,12 @@ wingit info cli/cli
 
 # List installed packages
 wingit list
+
+# Search for packages related to "terminal"
+wingit search terminal
+
+# Check environment/tooling health
+wingit doctor
 
 # Remove a package
 wingit remove cli/cli

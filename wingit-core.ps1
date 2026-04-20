@@ -322,6 +322,7 @@ function Invoke-Update {
             Write-Host 'No packages installed by WinGit.' -ForegroundColor DarkGray
             return
         }
+        Assert-Elevation -ScriptPath $PSCommandPath -Arguments @('update', '--all')
         Write-Phase 'Updating' "all $($entries.Count) installed package(s)..."
         Write-Blank
 
@@ -372,6 +373,85 @@ function Invoke-Update {
         Write-Host 'Already up to date.' -ForegroundColor Green
         Write-Host ''
     }
+}
+
+# ── Subcommand: search ───────────────────────────────────────────────────────
+function Invoke-Search {
+    param([Parameter(Mandatory)] [string] $Query)
+
+    Write-Header
+    Write-Phase 'Searching' "GitHub repositories for '$Query'..."
+    Write-Blank
+    Write-Trace "GET https://api.github.com/search/repositories?q=$( [System.Uri]::EscapeDataString($Query) )"
+
+    $results = Search-GitHubRepositories -Query $Query -Limit 10
+    if (-not $results -or $results.Count -eq 0) {
+        Write-Host 'No repositories found.' -ForegroundColor DarkGray
+        Write-Blank
+        return
+    }
+
+    $index = 1
+    foreach ($repo in $results) {
+        $name = "$($repo.owner.login)/$($repo.name)"
+        $stars = '{0:N0}' -f [int]$repo.stargazers_count
+        $lang = if ($repo.language) { $repo.language } else { 'Unknown' }
+
+        Write-Host ("[{0}] {1}" -f $index.ToString().PadLeft(2), $name) -ForegroundColor Cyan
+        Write-SubItem 'Stars'    $stars
+        Write-SubItem 'Language' $lang
+        if ($repo.description) { Write-SubItem 'About' $repo.description }
+        Write-SubItem 'URL'      $repo.html_url
+        Write-Blank
+        $index++
+    }
+}
+
+# ── Subcommand: doctor ───────────────────────────────────────────────────────
+function Invoke-Doctor {
+    Write-Header
+    Write-Phase 'Doctor' 'environment diagnostics'
+    Write-Blank
+
+    Write-Host '  Core tools:' -ForegroundColor Cyan
+    foreach ($tool in @('git', 'curl', 'tar')) {
+        if (Test-ToolOnPath $tool) {
+            Write-StatusOk -Label $tool
+        } else {
+            Write-StatusNotFound -Label $tool
+        }
+    }
+    Write-Blank
+
+    Write-Host '  Build tools:' -ForegroundColor Cyan
+    foreach ($tool in @('cmake', 'ninja', 'mingw32-make', 'cargo', 'go', 'node', 'npm', 'python', 'pip', 'dotnet', 'java', 'mvn')) {
+        if (Test-ToolOnPath $tool) {
+            Write-StatusOk -Label $tool
+        } else {
+            Write-StatusNotFound -Label $tool
+        }
+    }
+    Write-Blank
+
+    Write-Host '  GitHub API:' -ForegroundColor Cyan
+    if ($env:GITHUB_TOKEN) {
+        Write-StatusOk -Label 'GITHUB_TOKEN' -Detail 'set'
+    } else {
+        Write-StatusFail -Label 'GITHUB_TOKEN' -Detail 'not set'
+    }
+
+    try {
+        $rate = Invoke-GitHubApi -Url 'https://api.github.com/rate_limit'
+        if ($rate -and $rate.resources -and $rate.resources.core) {
+            $core = $rate.resources.core
+            Write-SubItem 'Remaining' "$($core.remaining) / $($core.limit)"
+            Write-SubItem 'Resets at' ([DateTimeOffset]::FromUnixTimeSeconds([int64]$core.reset).UtcDateTime.ToString('yyyy-MM-dd HH:mm:ss') + ' UTC')
+        }
+    } catch {
+        Write-WarnMsg "Unable to read GitHub rate limit: $($_.Exception.Message)"
+    }
+
+    Write-Blank
 }
 
 function Update-SinglePackage {
@@ -540,6 +620,8 @@ Usage:
   wingit remove  <owner>/<repo>   Remove an installed package
   wingit info    <owner>/<repo>   Show information about a package
   wingit list                     List packages installed by WinGit
+  wingit search  <query>          Search GitHub repositories
+  wingit doctor                   Run environment diagnostics
   wingit --version                Print WinGit version
   wingit --help                   Show this help message
 
@@ -553,6 +635,8 @@ Examples:
   wingit update  cli/cli
   wingit update  --all
   wingit info    cli/cli
+  wingit search  terminal
+  wingit doctor
 
 Environment variables:
   GITHUB_TOKEN    GitHub personal access token (increases API rate limit to 5,000/hr)
@@ -584,6 +668,19 @@ switch ($Command.ToLower()) {
     }
     'list' {
         Invoke-List
+    }
+    'search' {
+        if (-not $Target) {
+            Write-ErrorMsg "Missing query. Usage: wingit search <query>" -ExitCode 1
+        }
+        # Allow multi-word query from remaining args
+        if ($ExtraArgs -and $ExtraArgs.Count -gt 0) {
+            $Target = @($Target) + @($ExtraArgs | ForEach-Object { [string]$_ }) -join ' '
+        }
+        Invoke-Search -Query $Target
+    }
+    'doctor' {
+        Invoke-Doctor
     }
     '--version' {
         Write-Host "WinGit $script:Version"
