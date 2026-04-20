@@ -137,6 +137,7 @@ function Invoke-ReleaseInstall {
 
     $ext     = $Asset.name.ToLower()
     $success = $false
+    $installDirCreated = $false
 
     try {
         if ($ext.EndsWith('.msi')) {
@@ -164,6 +165,7 @@ function Invoke-ReleaseInstall {
             Write-SubItem 'Method' "extract to $installDir"
             if (-not (Test-Path $installDir)) {
                 New-Item -ItemType Directory -Path $installDir -Force | Out-Null
+                $installDirCreated = $true
             }
             Expand-Archive-Compat -ArchivePath $downloadPath -Destination $installDir
 
@@ -186,6 +188,10 @@ function Invoke-ReleaseInstall {
             $success = $true
         }
     } catch {
+        if ($installDirCreated -and (Test-Path $installDir)) {
+            Write-SubItem 'Cleanup' "Removing incomplete install directory: $installDir"
+            Remove-Item -Path $installDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
         Write-WarnMsg  "Downloaded file preserved at: $downloadPath"
         Write-ErrorMsg "Installation failed: $($_.Exception.Message)" -ExitCode 1
     }
@@ -216,13 +222,24 @@ function Invoke-SourceInstall {
     $srcDir    = [System.IO.Path]::Combine($env:TEMP, 'wingit', "$Repo-src")
     $installDir = [System.IO.Path]::Combine($env:PROGRAMFILES, 'WinGit', 'packages', "$Owner-$Repo")
 
+    if (Test-Path $srcDir) {
+        Write-SubItem 'Cleanup' "Removing existing source directory: $srcDir"
+        Remove-Item -Path $srcDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
     Write-Phase 'Fetching' 'source...'
 
     if (Test-ToolOnPath 'git') {
         $cloneUrl = "https://github.com/$Owner/${Repo}.git"
         Write-SubItem 'Cloning' "$cloneUrl  ->  $srcDir"
         & git clone --depth=1 $cloneUrl $srcDir 2>&1 | ForEach-Object { Write-Host "  $_" }
-        if ($LASTEXITCODE -ne 0) { Write-ErrorMsg "git clone failed." -ExitCode 1 }
+        if ($LASTEXITCODE -ne 0) {
+            if (Test-Path $srcDir) {
+                Write-SubItem 'Cleanup' "Removing failed clone directory: $srcDir"
+                Remove-Item -Path $srcDir -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            Write-ErrorMsg "git clone failed." -ExitCode 1
+        }
     } else {
         # Fallback: download zip archive. Use the repo's default branch.
         $zipUrl  = "https://github.com/$Owner/$Repo/archive/refs/heads/$DefaultBranch.zip"
@@ -256,7 +273,15 @@ function Invoke-SourceInstall {
 
     Write-Blank
 
-    Invoke-SourceBuild -Owner $Owner -Repo $Repo -SourceDir $srcDir -InstallDir $installDir
+    try {
+        Invoke-SourceBuild -Owner $Owner -Repo $Repo -SourceDir $srcDir -InstallDir $installDir
+    } catch {
+        if (Test-Path $installDir) {
+            Write-SubItem 'Cleanup' "Removing incomplete install directory: $installDir"
+            Remove-Item -Path $installDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        throw
+    }
 
     Add-RegistryEntry -Owner $Owner -Repo $Repo `
         -Version 'source' -InstallType 'source' `
