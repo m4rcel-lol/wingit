@@ -138,7 +138,11 @@ function Resolve-InstallPreferences {
             default { $remaining.Add($Arguments[$i]) | Out-Null }
         }
     }
-    return if ($remaining.Count -gt 0) { $remaining.ToArray() } else { @() }
+    if ($remaining.Count -gt 0) {
+        return $remaining.ToArray()
+    }
+
+    return @()
 }
 
 function Get-SystemReleaseArchitecture {
@@ -186,7 +190,7 @@ function Resolve-ReleaseArchitecturePreference {
     $detectedArchitecture = Get-SystemReleaseArchitecture
     return [PSCustomObject]@{
         Architecture    = $detectedArchitecture
-        DisplayLabel    = if ($detectedArchitecture) { $detectedArchitecture } else { 'unsupported' }
+        DisplayLabel    = $(if ($detectedArchitecture) { $detectedArchitecture } else { 'unsupported' })
         AutoDetected    = $true
         ReleaseEligible = [bool]$detectedArchitecture
     }

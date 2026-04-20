@@ -77,7 +77,7 @@ if ($entries -notcontains $InstallDir) {
     Set-ItemProperty -Path $regKey -Name 'Path' -Value $newPath -Type ExpandString
     $env:PATH = "$env:PATH;$InstallDir"
     Write-Host ''
-    Write-Host "  PATH   : updated — $InstallDir added."
+    Write-Host ('  PATH   : updated - ' + $InstallDir + ' added.')
 
     # Broadcast environment change to running processes
     try {
@@ -101,5 +101,5 @@ public class EnvBroadcast {
 
 Write-Host ''
 Write-Host 'Complete.' -ForegroundColor Green
-Write-Host "  WinGit is installed. Open a new terminal and run 'wingit --help'." -ForegroundColor Gray
+Write-Host '  WinGit is installed. Open a new terminal and run ''wingit --help''.' -ForegroundColor Gray
 Write-Host ''
