@@ -151,33 +151,70 @@ function Select-WindowsAsset {
     #>
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory)] [object[]] $Assets
+        [Parameter(Mandatory)] [object[]] $Assets,
+        [string] $Architecture = ''
     )
 
-    $windowsKeywords = @('windows', 'win64', 'win32', 'win-', 'x86_64-pc-windows', 'x64', 'amd64')
-    $extensions      = @('.msi', '.exe', '.zip', '.tar.gz')
+    $extensions = @('.msi', '.exe', '.zip', '.tar.gz')
 
-    # Filter to Windows-relevant assets only
-    $candidates = $Assets | Where-Object {
-        $name = $_.name.ToLower()
-        $windowsKeywords | Where-Object { $name -like "*$_*" }
+    $normalizedArch = switch ($Architecture.ToLower()) {
+        { $_ -in @('amd64', 'x86_64', 'x64') } { 'x64'; break }
+        { $_ -in @('arm64', 'aarch64') }       { 'arm64'; break }
+        { $_ -in @('x86', 'i386', 'i686') }    { 'x86'; break }
+        default                                { '' }
     }
 
-    if (-not $candidates) {
-        # Broaden: no platform keyword — include all assets matching an extension
-        $candidates = $Assets | Where-Object {
+    $archKeywords = @{
+        x64   = @('x86_64', 'x64', 'amd64', 'win64')
+        arm64 = @('arm64', 'aarch64')
+        x86   = @('x86', 'i386', 'i686', 'win32')
+    }
+
+    $windowsKeywords = @('windows', 'win', 'pc-windows')
+
+    # Stage 1: architecture-specific Windows assets.
+    $candidates = @()
+    if ($normalizedArch -and $archKeywords.ContainsKey($normalizedArch)) {
+        $archTokens = $archKeywords[$normalizedArch]
+        $candidates = @($Assets | Where-Object {
+            $name = $_.name.ToLower()
+            ($windowsKeywords | Where-Object { $name -like "*$_*" }) -and
+            ($archTokens | Where-Object { $name -like "*$_*" })
+        })
+    }
+
+    # Stage 2: generic Windows assets (no explicit architecture in the filename).
+    if (-not $candidates -or $candidates.Count -eq 0) {
+        $allArchTokens = @($archKeywords.Values | ForEach-Object { $_ }) | Select-Object -Unique
+        $candidates = @($Assets | Where-Object {
+            $name = $_.name.ToLower()
+            ($windowsKeywords | Where-Object { $name -like "*$_*" }) -and
+            -not ($allArchTokens | Where-Object { $name -like "*$_*" })
+        })
+    }
+
+    # Stage 3: fallback to any Windows asset.
+    if (-not $candidates -or $candidates.Count -eq 0) {
+        $candidates = @($Assets | Where-Object {
+            $name = $_.name.ToLower()
+            $windowsKeywords | Where-Object { $name -like "*$_*" }
+        })
+    }
+
+    # Stage 4: last resort, any known installable extension.
+    if (-not $candidates -or $candidates.Count -eq 0) {
+        $candidates = @($Assets | Where-Object {
             $name = $_.name.ToLower()
             $extensions | Where-Object { $name.EndsWith($_) }
-        }
+        })
     }
 
-    if (-not $candidates) { return $null }
+    if (-not $candidates -or $candidates.Count -eq 0) { return $null }
 
-    # Pick by extension priority
     foreach ($ext in $extensions) {
         $match = $candidates | Where-Object { $_.name.ToLower().EndsWith($ext) } | Select-Object -First 1
         if ($match) { return $match }
     }
 
-    return $null
+    return $candidates | Select-Object -First 1
 }
