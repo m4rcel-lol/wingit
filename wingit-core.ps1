@@ -67,7 +67,9 @@ $libDir = [System.IO.Path]::Combine($PSScriptRoot, 'lib')
 . "$libDir\elevation.ps1"
 
 # ── Version ─────────────────────────────────────────────────────────────────
-$script:Version = '1.1.0'
+$script:Version = '2.0.0'
+$script:PreferredArchitecture = ''
+$script:IncludePrerelease = $false
 
 # ── Ctrl+C handler ──────────────────────────────────────────────────────────
 # Do not treat Ctrl+C as regular input; let PowerShell handle it normally.
@@ -83,13 +85,44 @@ function Resolve-OwnerRepo {
     Write-ErrorMsg "Invalid target format '$PackageTarget'. Expected: <owner>/<repo>" -ExitCode 1
 }
 
+function Resolve-InstallPreferences {
+    param([object[]] $Arguments = @())
+
+    $remaining = [System.Collections.Generic.List[object]]::new()
+    for ($i = 0; $i -lt $Arguments.Count; $i++) {
+        $token = [string]$Arguments[$i]
+        switch ($token.ToLower()) {
+            '--pre-release' { $script:IncludePrerelease = $true; continue }
+            '--prerelease'  { $script:IncludePrerelease = $true; continue }
+            '--arch' {
+                if (($i + 1) -ge $Arguments.Count) {
+                    Write-ErrorMsg "Missing value for --arch. Allowed: x64, arm64, x86." -ExitCode 1
+                }
+                $i++
+                $arch = ([string]$Arguments[$i]).ToLower()
+                if ($arch -notin @('x64', 'arm64', 'x86')) {
+                    Write-ErrorMsg "Invalid architecture '$arch'. Allowed: x64, arm64, x86." -ExitCode 1
+                }
+                $script:PreferredArchitecture = $arch
+                continue
+            }
+            default { $remaining.Add($Arguments[$i]) | Out-Null }
+        }
+    }
+    return if ($remaining.Count -gt 0) { $remaining.ToArray() } else { @() }
+}
+
 # ── Subcommand: install ───────────────────────────────────────────────────────
 function Invoke-Install {
-    param([Parameter(Mandatory)] [string] $PackageTarget)
+    param(
+        [Parameter(Mandatory)] [string] $PackageTarget,
+        [object[]] $Arguments = @()
+    )
 
     $parsed = Resolve-OwnerRepo -PackageTarget $PackageTarget
     $owner  = $parsed.Owner
     $repo   = $parsed.Repo
+    $null   = Resolve-InstallPreferences -Arguments $Arguments
 
     Write-Header
 
@@ -117,12 +150,12 @@ function Invoke-Install {
     Write-Phase 'Checking' 'releases...'
     Write-Trace "GET https://api.github.com/repos/$owner/$repo/releases/latest"
 
-    $release    = Get-LatestRelease -Owner $owner -Repo $repo
+    $release    = Get-LatestRelease -Owner $owner -Repo $repo -IncludePrerelease:$script:IncludePrerelease
     $assetToUse = $null
 
     if ($release -and $release.assets -and $release.assets.Count -gt 0) {
         Write-Trace "Found $($release.assets.Count) release asset(s); selecting best Windows match"
-        $assetToUse = Select-WindowsAsset -Assets $release.assets
+        $assetToUse = Select-WindowsAsset -Assets $release.assets -Architecture $script:PreferredArchitecture
     }
 
     if ($assetToUse) {
@@ -238,7 +271,9 @@ function Invoke-ReleaseInstall {
     # Record in registry
     Add-RegistryEntry -Owner $Owner -Repo $Repo `
         -Version $Release.tag_name -InstallType 'release' `
-        -InstallPath $installDir -AssetName $Asset.name
+        -InstallPath $installDir -AssetName $Asset.name `
+        -Architecture $script:PreferredArchitecture `
+        -IncludePrerelease $script:IncludePrerelease
 
     # Cleanup temp files
     Remove-Item -Path $downloadPath -Force -ErrorAction SilentlyContinue
@@ -329,7 +364,9 @@ function Invoke-SourceInstall {
 
     Add-RegistryEntry -Owner $Owner -Repo $Repo `
         -Version 'source' -InstallType 'source' `
-        -InstallPath $installDir
+        -InstallPath $installDir `
+        -Architecture $script:PreferredArchitecture `
+        -IncludePrerelease $script:IncludePrerelease
 
     Write-Complete -Package "$Owner/$Repo" -InstallType 'source'
 }
@@ -358,7 +395,9 @@ function Invoke-Update {
         foreach ($entry in $entries) {
             $pkg = "$($entry.owner)/$($entry.repo)"
             Write-Phase 'Checking' "$pkg..."
-            $result = Update-SinglePackage -Owner $entry.owner -Repo $entry.repo -CurrentVersion $entry.version -InstallType $entry.install_type
+            $result = Update-SinglePackage -Owner $entry.owner -Repo $entry.repo `
+                -CurrentVersion $entry.version -InstallType $entry.install_type `
+                -Architecture $entry.architecture -IncludePrerelease ([bool]$entry.include_prerelease)
             switch ($result) {
                 'updated'   { $updated++   }
                 'uptodate'  { $upToDate++  }
@@ -392,7 +431,9 @@ function Invoke-Update {
     }
 
     Assert-Elevation -ScriptPath $PSCommandPath -Arguments @('update', $PackageTarget)
-    $result = Update-SinglePackage -Owner $parsed.Owner -Repo $parsed.Repo -CurrentVersion $currentVersion -InstallType $installType
+    $result = Update-SinglePackage -Owner $parsed.Owner -Repo $parsed.Repo `
+        -CurrentVersion $currentVersion -InstallType $installType `
+        -Architecture $entry.architecture -IncludePrerelease ([bool]$entry.include_prerelease)
     if ($result -eq 'uptodate') {
         Write-Host ''
         Write-Host 'Already up to date.' -ForegroundColor Green
@@ -487,12 +528,14 @@ function Update-SinglePackage {
         [Parameter(Mandatory)] [string] $Owner,
         [Parameter(Mandatory)] [string] $Repo,
         [string] $CurrentVersion = '',
-        [string] $InstallType    = ''
+        [string] $InstallType    = '',
+        [string] $Architecture   = '',
+        [bool] $IncludePrerelease = $false
     )
 
     try {
         Write-Trace "GET https://api.github.com/repos/$Owner/$Repo/releases/latest"
-        $release = Get-LatestRelease -Owner $Owner -Repo $Repo
+        $release = Get-LatestRelease -Owner $Owner -Repo $Repo -IncludePrerelease:$IncludePrerelease
 
         if ($InstallType -eq 'source' -or (-not $release)) {
             # Source installs: always re-fetch and rebuild
@@ -514,7 +557,7 @@ function Update-SinglePackage {
 
         $assetToUse = $null
         if ($release.assets -and $release.assets.Count -gt 0) {
-            $assetToUse = Select-WindowsAsset -Assets $release.assets
+            $assetToUse = Select-WindowsAsset -Assets $release.assets -Architecture $Architecture
         }
 
         if ($assetToUse) {
@@ -531,6 +574,50 @@ function Update-SinglePackage {
     } catch {
         Write-WarnMsg "Update failed for $Owner/$Repo`: $($_.Exception.Message)"
         return 'failed'
+    }
+}
+
+function Invoke-Outdated {
+    Write-Header
+    Write-Phase 'Outdated' 'checking installed packages against GitHub releases...'
+    Write-Blank
+
+    $entries = Read-Registry
+    if (-not $entries -or $entries.Count -eq 0) {
+        Write-Host 'No packages installed by WinGit.' -ForegroundColor DarkGray
+        Write-Blank
+        return
+    }
+
+    $outdated = @()
+    foreach ($entry in $entries) {
+        if ($entry.install_type -eq 'source') { continue }
+        $release = Get-LatestRelease -Owner $entry.owner -Repo $entry.repo -IncludePrerelease:([bool]$entry.include_prerelease)
+        if (-not $release) { continue }
+        if ($entry.version -ne $release.tag_name) {
+            $outdated += [PSCustomObject]@{
+                package    = "$($entry.owner)/$($entry.repo)"
+                installed  = if ($entry.version) { $entry.version } else { '(unknown)' }
+                latest     = $release.tag_name
+                prerelease = [bool]$release.prerelease
+            }
+        }
+    }
+
+    if ($outdated.Count -eq 0) {
+        Write-Host 'All release-installed packages are up to date.' -ForegroundColor Green
+        Write-Blank
+        return
+    }
+
+    foreach ($pkg in $outdated) {
+        Write-Host "  $($pkg.package)" -ForegroundColor Cyan
+        Write-SubItem 'Installed' $pkg.installed
+        Write-SubItem 'Latest' $pkg.latest
+        if ($pkg.prerelease) {
+            Write-SubItem 'Channel' 'pre-release'
+        }
+        Write-Blank
     }
 }
 
@@ -563,6 +650,12 @@ function Invoke-Info {
         }
         if ($entry.asset_name) {
             Write-SubItem 'Asset' $entry.asset_name
+        }
+        if ($entry.architecture) {
+            Write-SubItem 'Architecture' $entry.architecture
+        }
+        if ($entry.PSObject.Properties.Name -contains 'include_prerelease' -and $entry.include_prerelease) {
+            Write-SubItem 'Release channel' 'pre-release enabled'
         }
     } else {
         Write-Host '  Not installed via WinGit.' -ForegroundColor DarkGray
@@ -645,6 +738,7 @@ Usage:
   wingit remove  <owner>/<repo>   Remove an installed package
   wingit info    <owner>/<repo>   Show information about a package
   wingit list                     List packages installed by WinGit
+  wingit outdated                 Show installed packages with newer releases available
   wingit search  <query>          Search GitHub repositories
   wingit doctor                   Run environment diagnostics
   wingit --version                Print WinGit version
@@ -652,6 +746,8 @@ Usage:
 
 Options:
   -v, --verbose                   Show verbose diagnostic output
+  --arch <x64|arm64|x86>          Prefer architecture-specific release assets
+  --pre-release                   Allow prerelease versions in install/update checks
 
 Examples:
   wingit install cli/cli
@@ -660,6 +756,7 @@ Examples:
   wingit update  cli/cli
   wingit update  --all
   wingit info    cli/cli
+  wingit outdated
   wingit search  terminal
   wingit doctor
 
@@ -674,7 +771,7 @@ switch ($Command.ToLower()) {
         if (-not $Target) {
             Write-ErrorMsg "Missing target. Usage: wingit install <owner>/<repo>" -ExitCode 1
         }
-        Invoke-Install -PackageTarget $Target
+        Invoke-Install -PackageTarget $Target -Arguments $ExtraArgs
     }
     'update' {
         Invoke-Update -PackageTarget $Target
@@ -693,6 +790,9 @@ switch ($Command.ToLower()) {
     }
     'list' {
         Invoke-List
+    }
+    'outdated' {
+        Invoke-Outdated
     }
     'search' {
         if (-not $Target) {

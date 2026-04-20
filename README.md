@@ -11,6 +11,7 @@ it locally when no binary release exists.
 - **Release install** — downloads the best Windows binary asset (`.msi`, `.exe`, `.zip`, `.tar.gz`) from the latest GitHub release.
 - **Source build** — auto-detects the build system (CMake, Cargo, Go, npm, Python, Gradle, Maven, MSBuild, Meson, Make) and compiles from source.
 - **Update** — updates an installed package to the latest version, or updates all packages at once with `--all`.
+- **Outdated report** — checks installed release packages and shows which ones have updates available.
 - **Info** — shows GitHub metadata and local install details for any package.
 - **Search** — searches GitHub repositories and prints the top matches with stars, language, and URLs.
 - **Doctor** — checks environment readiness (core/build tools + GitHub API rate-limit status).
@@ -46,6 +47,7 @@ wingit update  --all            Update all packages installed by WinGit
 wingit remove  <owner>/<repo>   Remove an installed package
 wingit info    <owner>/<repo>   Show information about a package
 wingit list                     List packages installed by WinGit
+wingit outdated                 Show installed packages with newer releases available
 wingit search  <query>          Search GitHub repositories
 wingit doctor                   Run environment diagnostics
 wingit --version                Print WinGit version
@@ -56,6 +58,8 @@ wingit --help                   Show help
 
 ```
 -v, --verbose   Show verbose diagnostic output (API URLs, paths, extra detail)
+--arch <x64|arm64|x86>   Prefer architecture-specific release assets
+--pre-release   Allow prerelease versions in install and update checks
 ```
 
 ### Examples
@@ -81,6 +85,9 @@ wingit info cli/cli
 
 # List installed packages
 wingit list
+
+# Check outdated packages
+wingit outdated
 
 # Search for packages related to "terminal"
 wingit search terminal

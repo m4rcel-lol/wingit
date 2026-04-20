@@ -73,7 +73,9 @@ function Add-RegistryEntry {
         [string] $Version     = '',
         [string] $InstallType = 'release',
         [string] $InstallPath = '',
-        [string] $AssetName   = ''
+        [string] $AssetName   = '',
+        [string] $Architecture = '',
+        [bool] $IncludePrerelease = $false
     )
 
     $entries = Read-Registry
@@ -88,6 +90,8 @@ function Add-RegistryEntry {
         install_path = $InstallPath
         installed_at = ([datetime]::UtcNow.ToString('o'))
         asset_name   = $AssetName
+        architecture = $Architecture
+        include_prerelease = $IncludePrerelease
     }
 
     $entries += $newEntry
