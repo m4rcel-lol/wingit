@@ -57,6 +57,21 @@ function Resolve-OwnerRepo {
     Write-ErrorMsg "Invalid target format '$PackageTarget'. Expected: <owner>/<repo>" -ExitCode 1
 }
 
+function Get-SystemProfile {
+    try {
+        $arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLower()
+        $os   = [System.Runtime.InteropServices.RuntimeInformation]::OSDescription
+    } catch {
+        $arch = $env:PROCESSOR_ARCHITECTURE.ToLower()
+        $os   = if ($PSVersionTable.OS) { $PSVersionTable.OS } else { 'Windows' }
+    }
+
+    return @{
+        Architecture = $arch
+        OSDescription = $os
+    }
+}
+
 # ── Subcommand: install ───────────────────────────────────────────────────────
 function Invoke-Install {
     param([Parameter(Mandatory)] [string] $PackageTarget)
@@ -88,9 +103,13 @@ function Invoke-Install {
 
     $release    = Get-LatestRelease -Owner $owner -Repo $repo
     $assetToUse = $null
+    $system     = Get-SystemProfile
+    $arch       = $system.Architecture
+    $osDesc     = $system.OSDescription
 
     if ($release -and $release.assets -and $release.assets.Count -gt 0) {
-        $assetToUse = Select-WindowsAsset -Assets $release.assets
+        Write-SubItem 'System' "$osDesc ($arch)"
+        $assetToUse = Select-WindowsAsset -Assets $release.assets -Architecture $arch
     }
 
     if ($assetToUse) {
@@ -105,7 +124,7 @@ function Invoke-Install {
 
     } else {
         if ($release) {
-            Write-Host 'no suitable Windows binary found.' -ForegroundColor DarkYellow
+            Write-Host "no suitable Windows binary found for '$arch'." -ForegroundColor DarkYellow
         } else {
             Write-Host 'no releases found.' -ForegroundColor DarkYellow
         }
