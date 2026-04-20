@@ -115,6 +115,31 @@ function Get-LatestRelease {
     return $release
 }
 
+function Search-GitHubRepositories {
+    <#
+    .SYNOPSIS
+        Searches GitHub repositories and returns ranked results.
+    .PARAMETER Query
+        Search query string.
+    .PARAMETER Limit
+        Maximum number of results to return (1-50).
+    .OUTPUTS
+        Array of repository result objects.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string] $Query,
+        [ValidateRange(1, 50)] [int] $Limit = 10
+    )
+
+    $encoded = [System.Uri]::EscapeDataString($Query)
+    $url = "https://api.github.com/search/repositories?q=$encoded&sort=stars&order=desc&per_page=$Limit"
+    $result = Invoke-GitHubApi -Url $url
+
+    if (-not $result -or -not $result.items) { return @() }
+    return @($result.items)
+}
+
 function Select-WindowsAsset {
     <#
     .SYNOPSIS
