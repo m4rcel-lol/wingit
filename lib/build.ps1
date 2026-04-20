@@ -353,13 +353,47 @@ function Invoke-DotNetBuild {
 
     Push-Location $SourceDir
     try {
+        $buildConfiguration = if ($env:BUILD_CONFIGURATION) { $env:BUILD_CONFIGURATION } else { 'Release' }
+
         Write-Command 'dotnet restore'
         & dotnet restore
         if ($LASTEXITCODE -ne 0) { throw "dotnet restore failed (exit $LASTEXITCODE)" }
 
         $publishDir = [System.IO.Path]::Combine($InstallDir, 'bin')
-        Write-Command "dotnet publish -c Release -o `"$publishDir`""
-        & dotnet publish -c Release -o $publishDir
+        $publishArgs = @('publish', '-c', $buildConfiguration, '-o', $publishDir)
+        $projectFile = Get-ChildItem -Path $SourceDir -File -Recurse -Include *.csproj, *.fsproj, *.vbproj | Select-Object -First 1
+        $isWindowsTarget = $false
+
+        if ($projectFile) {
+            try {
+                [xml] $projectXml = Get-Content -Path $projectFile.FullName -Raw
+                $tfmNodes = @(
+                    $projectXml.Project.PropertyGroup.TargetFramework,
+                    $projectXml.Project.PropertyGroup.TargetFrameworks
+                ) | Where-Object { $_ }
+
+                $tfms = @($tfmNodes) -join ';'
+                if ($tfms -match 'windows') {
+                    $isWindowsTarget = $true
+                }
+            } catch {
+                Write-WarnMsg "Unable to inspect target framework in $($projectFile.Name). Continuing with default dotnet publish arguments."
+            }
+        }
+
+        if ($isWindowsTarget) {
+            $publishArgs += @(
+                '-r', 'win-x64',
+                '-p:Platform=x64',
+                '-p:WindowsPackageType=None',
+                '-p:WindowsAppSDKSelfContained=true',
+                '-p:SelfContained=true',
+                '-p:PublishSingleFile=false'
+            )
+        }
+
+        Write-Command ("dotnet " + ($publishArgs -join ' '))
+        & dotnet @publishArgs
         if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed (exit $LASTEXITCODE)" }
 
         Write-SubItem 'Output' "→ $publishDir"
