@@ -152,9 +152,22 @@ function Invoke-NpmBuild {
         $result = Invoke-NativeCommand -FilePath 'npm' -ArgumentList @('install')
         if ($result.ExitCode -ne 0) { throw "npm install failed (exit $($result.ExitCode))" }
 
-        Write-Command 'npm run build'
-        $result = Invoke-NativeCommand -FilePath 'npm' -ArgumentList @('run', 'build')
-        if ($result.ExitCode -ne 0) { throw "npm run build failed (exit $($result.ExitCode))" }
+        $hasBuildScript = $false
+        try {
+            $packageJson = Get-Content -Path (Join-Path $SourceDir 'package.json') -Raw | ConvertFrom-Json
+            $hasBuildScript = [bool]($packageJson.scripts -and
+                $packageJson.scripts.PSObject.Properties.Name -contains 'build')
+        } catch {
+            Write-WarnMsg "Could not inspect package.json scripts: $($_.Exception.Message)"
+        }
+
+        if ($hasBuildScript) {
+            Write-Command 'npm run build'
+            $result = Invoke-NativeCommand -FilePath 'npm' -ArgumentList @('run', 'build')
+            if ($result.ExitCode -ne 0) { throw "npm run build failed (exit $($result.ExitCode))" }
+        } else {
+            Write-SubItem 'Build' 'no build script defined; dependencies installed only'
+        }
     } finally {
         Pop-Location
     }
@@ -605,15 +618,48 @@ function Get-NormalizedDirectoryPath {
     return $fullPath
 }
 
-function Get-SystemPathEntries {
+$script:MachineEnvironmentKeyPath = 'SYSTEM\CurrentControlSet\Control\Session Manager\Environment'
+
+function Get-RawSystemPath {
     <#
-    .SYNOPSIS Returns the machine PATH as a list of entries.
+    .SYNOPSIS Reads the machine PATH without expanding %VARIABLE% entries.
     #>
     [CmdletBinding()]
     param()
 
-    $regKey = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment'
-    $current = (Get-ItemProperty -Path $regKey -Name 'Path' -ErrorAction SilentlyContinue).Path
+    $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($script:MachineEnvironmentKeyPath)
+    if (-not $key) { return '' }
+    try {
+        return [string]$key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+    } finally {
+        $key.Close()
+    }
+}
+
+function Set-RawSystemPath {
+    <#
+    .SYNOPSIS Writes the machine PATH as REG_EXPAND_SZ, preserving %VARIABLE% entries.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] [AllowEmptyString()] [string] $Value)
+
+    $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($script:MachineEnvironmentKeyPath, $true)
+    if (-not $key) { throw 'Unable to open the machine environment registry key for writing.' }
+    try {
+        $key.SetValue('Path', $Value, [Microsoft.Win32.RegistryValueKind]::ExpandString)
+    } finally {
+        $key.Close()
+    }
+}
+
+function Get-SystemPathEntries {
+    <#
+    .SYNOPSIS Returns the machine PATH as a list of entries (unexpanded).
+    #>
+    [CmdletBinding()]
+    param()
+
+    $current = Get-RawSystemPath
     if (-not $current) { return @() }
 
     return @(
@@ -654,7 +700,6 @@ function Add-DirectoryToSystemPath {
     [CmdletBinding()]
     param([Parameter(Mandatory)] [string] $Directory)
 
-    $regKey = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment'
     $entries = @(Get-SystemPathEntries)
     $targetPath = Get-NormalizedDirectoryPath -Path $Directory
 
@@ -673,7 +718,7 @@ function Add-DirectoryToSystemPath {
         $Directory
     }
 
-    Set-ItemProperty -Path $regKey -Name 'Path' -Value $newPath -Type ExpandString
+    Set-RawSystemPath -Value $newPath
     Update-EnvironmentPath
     Write-SubItem 'PATH' "updated (system-wide)"
     Invoke-EnvironmentChangeBroadcast
@@ -701,7 +746,6 @@ function Remove-DirectoryFromSystemPath {
     [CmdletBinding()]
     param([Parameter(Mandatory)] [string] $Directory)
 
-    $regKey = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment'
     $entries = @(Get-SystemPathEntries)
     $targetPath = Get-NormalizedDirectoryPath -Path $Directory
     $remaining = @($entries | Where-Object {
@@ -713,7 +757,7 @@ function Remove-DirectoryFromSystemPath {
         return $false
     }
 
-    Set-ItemProperty -Path $regKey -Name 'Path' -Value ($remaining -join ';') -Type ExpandString
+    Set-RawSystemPath -Value ($remaining -join ';')
     Update-EnvironmentPath
     Write-SubItem 'PATH' "removed $Directory"
     Invoke-EnvironmentChangeBroadcast
@@ -784,10 +828,10 @@ function Invoke-SourceBuild {
     $binDir = [System.IO.Path]::Combine($InstallDir, 'bin')
     if (Test-Path $binDir) {
         Write-SubItem 'Binaries' "→ $binDir"
-        Add-DirectoryToSystemPath -Directory $binDir
+        Add-DirectoryToSystemPath -Directory $binDir | Out-Null
         $pathEntries += $binDir
     } else {
-        Add-DirectoryToSystemPath -Directory $InstallDir
+        Add-DirectoryToSystemPath -Directory $InstallDir | Out-Null
         $pathEntries += $InstallDir
     }
 

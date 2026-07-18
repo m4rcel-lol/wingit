@@ -91,27 +91,25 @@ function Invoke-CurlDownload {
     $progressFile = [System.IO.Path]::GetTempFileName()
     try {
         $process = Start-Process -FilePath $CurlPath `
-            -ArgumentList @('-L', '--silent', '--show-error', '--output', $Destination,
+            -ArgumentList @('-L', '--fail', '--silent', '--show-error', '--output', $Destination,
                             '--write-out', '%{size_download}\n%{speed_download}\n%{http_code}',
                             $Url) `
             -NoNewWindow -Wait -PassThru -RedirectStandardOutput $progressFile
 
         $info = Get-Content $progressFile -Raw
-        if ($process.ExitCode -ne 0) {
-            throw "curl.exe exited with code $($process.ExitCode)"
+
+        # Parse http_code from write-out (last non-empty line); prefer it over
+        # the raw exit code because it produces a clearer error message.
+        $lines = @(($info -split "`n") | Where-Object { $_.Trim() })
+        $httpCode = 0
+        if ($lines.Count -gt 0 -and [int]::TryParse($lines[-1].Trim(), [ref]$httpCode)) {
+            if ($httpCode -ge 400) {
+                throw "HTTP $httpCode received from server."
+            }
         }
 
-        # Parse http_code from write-out (last non-empty line)
-        $lines = @(($info -split "`n") | Where-Object { $_.Trim() })
-        if ($lines.Count -gt 0) {
-            try {
-                $httpCode = [int]($lines[-1])
-                if ($httpCode -lt 200 -or $httpCode -ge 400) {
-                    throw "HTTP $httpCode received from server."
-                }
-            } catch [System.FormatException] {
-                # Could not parse HTTP code — assume success if file was written
-            }
+        if ($process.ExitCode -ne 0) {
+            throw "curl.exe exited with code $($process.ExitCode)"
         }
     } finally {
         Remove-Item $progressFile -Force -ErrorAction SilentlyContinue
@@ -138,10 +136,6 @@ function Invoke-WebRequestDownload {
     )
 
     $userAgent = if ($script:Version) { "WinGit/$script:Version" } else { 'WinGit' }
-    $headers = @{ 'User-Agent' = $userAgent }
-    if ($env:GITHUB_TOKEN -and $Url -like '*api.github.com*') {
-        $headers['Authorization'] = "token $env:GITHUB_TOKEN"
-    }
 
     # Stream download with manual progress tracking
     $request  = [System.Net.HttpWebRequest]::Create($Url)

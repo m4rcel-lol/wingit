@@ -108,7 +108,7 @@ $libDir = [System.IO.Path]::Combine($PSScriptRoot, 'lib')
 . "$libDir\elevation.ps1"
 
 # ── Version ─────────────────────────────────────────────────────────────────
-$script:Version = '3.0.0'
+$script:Version = '3.0.1'
 $script:PreferredArchitecture = ''
 $script:IncludePrerelease = $false
 $script:ForceSourceInstall = $false
@@ -140,6 +140,21 @@ function Get-PackageStorageName {
     return $safeName.Trim('-').ToLower()
 }
 
+function Get-KnownHostProvider {
+    <#
+    .SYNOPSIS Maps well-known forge host names to their provider, or '' when unknown.
+    #>
+    param([string] $HostName = '')
+
+    switch ($HostName.ToLower()) {
+        'github.com'   { return 'github' }
+        'gitlab.com'   { return 'gitlab' }
+        'codeberg.org' { return 'forgejo' }
+        'gitea.com'    { return 'gitea' }
+        default        { return '' }
+    }
+}
+
 function Resolve-OwnerRepo {
     param(
         [Parameter(Mandatory)] [string] $PackageTarget,
@@ -148,10 +163,12 @@ function Resolve-OwnerRepo {
 
     $remainingArguments = @(Normalize-RemainingArguments -Arguments $Arguments)
     $provider = 'github'
+    $providerExplicit = $false
     $locator = $PackageTarget.Trim()
 
     if ($PackageTarget -and $PackageTarget.Trim().ToLower() -in (Get-SupportedForgeProviders)) {
         $provider = Get-NormalizedForgeProvider -Provider $PackageTarget.Trim().ToLower()
+        $providerExplicit = $true
         if ($remainingArguments.Count -eq 0) {
             Write-ErrorMsg "Missing repository target after provider '$provider'." -ExitCode 1
         }
@@ -200,6 +217,15 @@ function Resolve-OwnerRepo {
 
     if (-not $owner -or -not $repo) {
         Write-ErrorMsg "Invalid repository target '$PackageTarget'." -ExitCode 1
+    }
+
+    # When the provider was not stated explicitly, infer it from well-known
+    # hosts so URLs like https://gitlab.com/owner/repo use the right API.
+    if (-not $providerExplicit -and $forgeHost) {
+        $inferredProvider = Get-KnownHostProvider -HostName $forgeHost
+        if ($inferredProvider) {
+            $provider = $inferredProvider
+        }
     }
 
     $forgeHost = Get-NormalizedForgeHost -Provider $provider -ForgeHost $forgeHost
@@ -511,7 +537,11 @@ function Invoke-Install {
     Write-Phase 'resolving' $parsed.DisplayName
     Write-Trace "provider=$provider host=$forgeHost"
 
-    $repoInfo = Get-RepoInfo -Provider $provider -ForgeHost $forgeHost -Owner $owner -Repo $repo
+    try {
+        $repoInfo = Get-RepoInfo -Provider $provider -ForgeHost $forgeHost -Owner $owner -Repo $repo
+    } catch {
+        Write-ErrorMsg $_.Exception.Message -ExitCode 1
+    }
     if (-not $repoInfo) {
         Write-ErrorMsg "Repository '$($parsed.DisplayName)' was not found on $forgeHost." -ExitCode 1
     }
@@ -563,7 +593,11 @@ function Invoke-Install {
 
     Write-Trace "fetching latest release metadata"
 
-    $release    = Get-LatestRelease -Provider $provider -ForgeHost $forgeHost -Owner $owner -Repo $repo -IncludePrerelease:$script:IncludePrerelease
+    try {
+        $release = Get-LatestRelease -Provider $provider -ForgeHost $forgeHost -Owner $owner -Repo $repo -IncludePrerelease:$script:IncludePrerelease
+    } catch {
+        Write-ErrorMsg $_.Exception.Message -ExitCode 1
+    }
     $assetToUse = $null
 
     if ($release -and $release.assets -and $release.assets.Count -gt 0) {
@@ -670,8 +704,15 @@ function Invoke-ReleaseInstall {
             }
             Expand-Archive-Compat -ArchivePath $downloadPath -Destination $installDir
 
-            # Try to find and run an installer inside the archive
-            $innerInstaller = Get-ChildItem -Path $installDir -Include '*.msi','*.exe' -Recurse |
+            # Try to find and run an installer inside the archive. Only .msi files
+            # or executables whose name clearly marks them as installers qualify —
+            # portable-app archives ship the application .exe itself, which must
+            # not be executed.
+            $innerInstaller = Get-ChildItem -Path $installDir -Recurse -File -ErrorAction SilentlyContinue |
+                              Where-Object {
+                                  $_.Extension -ieq '.msi' -or
+                                  ($_.Extension -ieq '.exe' -and $_.BaseName -imatch '(^|[-_.])(setup|install|installer)([-_.]|$)')
+                              } |
                               Select-Object -First 1
             if ($innerInstaller) {
                 Write-SubItem 'Running' $innerInstaller.Name
@@ -686,7 +727,7 @@ function Invoke-ReleaseInstall {
                 # No installer found — add extract dir to system PATH
                 $binDir = [System.IO.Path]::Combine($installDir, 'bin')
                 $pathToAdd = if (Test-Path $binDir) { $binDir } else { $installDir }
-                Add-DirectoryToSystemPath -Directory $pathToAdd
+                Add-DirectoryToSystemPath -Directory $pathToAdd | Out-Null
                 $pathEntries += $pathToAdd
             }
             $success = $true
@@ -953,9 +994,11 @@ function Invoke-Update {
     }
 
     Assert-Elevation -ScriptPath $PSCommandPath -Arguments (@('update', $PackageTarget) + @($Arguments | ForEach-Object { [string]$_ }))
+    $entryArchitecture = if ($entry -and $entry.architecture) { [string]$entry.architecture } else { '' }
+    $entryPrerelease   = [bool]($entry -and $entry.include_prerelease)
     $result = Update-SinglePackage -Provider $parsed.Provider -ForgeHost $parsed.Host -Owner $parsed.Owner -Repo $parsed.Repo `
         -CurrentVersion $currentVersion -InstallType $installType `
-        -Architecture $entry.architecture -IncludePrerelease ([bool]$entry.include_prerelease)
+        -Architecture $entryArchitecture -IncludePrerelease $entryPrerelease
     if ($result -eq 'uptodate') {
         Write-Host ''
         Write-Host 'Already up to date.' -ForegroundColor Green
@@ -1003,7 +1046,11 @@ function Invoke-Search {
     Write-Blank
     Write-Trace "search provider=$provider host=$resolvedHost query=$queryText"
 
-    $results = Search-ForgeRepositories -Provider $provider -ForgeHost $resolvedHost -Query $queryText -Limit 10
+    try {
+        $results = Search-ForgeRepositories -Provider $provider -ForgeHost $resolvedHost -Query $queryText -Limit 10
+    } catch {
+        Write-ErrorMsg $_.Exception.Message -ExitCode 1
+    }
     if (-not $results -or $results.Count -eq 0) {
         Write-Host 'No repositories found.' -ForegroundColor DarkGray
         Write-Blank
@@ -1132,7 +1179,8 @@ function Update-SinglePackage {
             }
             Write-SubItem 'Action' 're-building from latest source'
             $repoInfo = Get-RepoInfo -Provider $Provider -ForgeHost $ForgeHost -Owner $Owner -Repo $Repo
-            Invoke-SourceInstall -Provider $Provider -ForgeHost $ForgeHost -Owner $Owner -Repo $Repo -DefaultBranch ($repoInfo.default_branch)
+            $defaultBranch = if ($repoInfo -and $repoInfo.default_branch) { $repoInfo.default_branch } else { 'main' }
+            Invoke-SourceInstall -Provider $Provider -ForgeHost $ForgeHost -Owner $Owner -Repo $Repo -DefaultBranch $defaultBranch
             return 'updated'
         }
 
@@ -1157,7 +1205,8 @@ function Update-SinglePackage {
         } else {
             Write-Blank
             $repoInfo = Get-RepoInfo -Provider $Provider -ForgeHost $ForgeHost -Owner $Owner -Repo $Repo
-            Invoke-SourceInstall -Provider $Provider -ForgeHost $ForgeHost -Owner $Owner -Repo $Repo -DefaultBranch ($repoInfo.default_branch) -DisplayName $displayName
+            $defaultBranch = if ($repoInfo -and $repoInfo.default_branch) { $repoInfo.default_branch } else { 'main' }
+            Invoke-SourceInstall -Provider $Provider -ForgeHost $ForgeHost -Owner $Owner -Repo $Repo -DefaultBranch $defaultBranch -DisplayName $displayName
         }
         return 'updated'
 
@@ -1182,7 +1231,12 @@ function Invoke-Outdated {
     $outdated = @()
     foreach ($entry in $entries) {
         if ($entry.install_type -eq 'source') { continue }
-        $release = Get-LatestRelease -Provider (Get-EntryProvider -Entry $entry) -ForgeHost (Get-EntryHost -Entry $entry) -Owner $entry.owner -Repo $entry.repo -IncludePrerelease:([bool]$entry.include_prerelease)
+        try {
+            $release = Get-LatestRelease -Provider (Get-EntryProvider -Entry $entry) -ForgeHost (Get-EntryHost -Entry $entry) -Owner $entry.owner -Repo $entry.repo -IncludePrerelease:([bool]$entry.include_prerelease)
+        } catch {
+            Write-WarnMsg "Could not check $($entry.owner)/$($entry.repo): $($_.Exception.Message)"
+            continue
+        }
         if (-not $release) { continue }
         if ($entry.version -ne $release.tag_name) {
             $outdated += [PSCustomObject]@{
@@ -1271,7 +1325,13 @@ function Invoke-Info {
     Write-Host '  Remote:' -ForegroundColor Cyan
     Write-Trace "provider=$provider host=$forgeHost"
 
-    $repoInfo = Get-RepoInfo -Provider $provider -ForgeHost $forgeHost -Owner $owner -Repo $repo
+    try {
+        $repoInfo = Get-RepoInfo -Provider $provider -ForgeHost $forgeHost -Owner $owner -Repo $repo
+    } catch {
+        Write-WarnMsg "Could not fetch remote metadata: $($_.Exception.Message)"
+        Write-Blank
+        return
+    }
     if ($repoInfo) {
         $stars   = if ($repoInfo.stargazers_count) { '{0:N0}' -f $repoInfo.stargazers_count } else { '0' }
         $forks   = if ($repoInfo.forks_count)      { '{0:N0}' -f $repoInfo.forks_count }      else { '0' }
@@ -1293,7 +1353,12 @@ function Invoke-Info {
 
         Write-Blank
         Write-Trace 'fetching latest release metadata'
-        $release = Get-LatestRelease -Provider $provider -ForgeHost $forgeHost -Owner $owner -Repo $repo
+        $release = $null
+        try {
+            $release = Get-LatestRelease -Provider $provider -ForgeHost $forgeHost -Owner $owner -Repo $repo
+        } catch {
+            Write-WarnMsg "Could not fetch release metadata: $($_.Exception.Message)"
+        }
         if ($release) {
             Write-Host '  Latest release:' -ForegroundColor Cyan
             Write-SubItem 'Tag'       $release.tag_name

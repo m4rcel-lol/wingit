@@ -22,9 +22,11 @@ $principal = [Security.Principal.WindowsPrincipal]::new($identity)
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     Write-Host 'warn: install.ps1 must be run as Administrator.' -ForegroundColor DarkYellow
     Write-Host '      Re-launching with elevated permissions...'
+    # Quote paths explicitly: Start-Process joins the argument list with spaces
+    # and does not quote, so paths like "C:\Program Files\WinGit" would split.
     Start-Process powershell.exe `
         -Verb RunAs `
-        -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $PSCommandPath, '-InstallDir', $InstallDir)
+        -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" -InstallDir `"$InstallDir`""
     exit 0
 }
 
@@ -67,14 +69,18 @@ Get-ChildItem -Path $libSrc -Filter '*.ps1' | ForEach-Object {
 }
 
 # ── Register on system PATH ───────────────────────────────────────────────────
-$regKey  = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment'
-$current = (Get-ItemProperty -Path $regKey -Name 'Path').Path
+# Read/write the raw (unexpanded) value so existing %VARIABLE% entries in the
+# machine PATH are preserved instead of being written back expanded.
+$envKey  = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey(
+    'SYSTEM\CurrentControlSet\Control\Session Manager\Environment', $true)
+$current = [string]$envKey.GetValue('Path', '',
+    [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
 
-$entries = $current -split ';' | Where-Object { $_ -ne '' }
+$entries = $current -split ';' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
 
 if ($entries -notcontains $InstallDir) {
-    $newPath = "$current;$InstallDir"
-    Set-ItemProperty -Path $regKey -Name 'Path' -Value $newPath -Type ExpandString
+    $newPath = (@($entries) + $InstallDir) -join ';'
+    $envKey.SetValue('Path', $newPath, [Microsoft.Win32.RegistryValueKind]::ExpandString)
     $env:PATH = "$env:PATH;$InstallDir"
     Write-Host ''
     Write-Host ('  PATH   : updated - ' + $InstallDir + ' added.')
@@ -98,6 +104,8 @@ public class EnvBroadcast {
     Write-Host ''
     Write-Host "  PATH   : already contains $InstallDir (no change needed)."
 }
+
+$envKey.Close()
 
 Write-Host ''
 Write-Host 'Complete.' -ForegroundColor Green

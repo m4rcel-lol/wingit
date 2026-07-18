@@ -154,11 +154,12 @@ function Invoke-ApiRequest {
                 return $null
             }
 
-            if ($statusCode -eq 403 -and $ProviderLabel -eq 'GitHub') {
-                $remaining = $_.Exception.Response.Headers['X-RateLimit-Remaining']
-                if ($remaining -and $remaining -eq '0') {
-                    Write-ErrorMsg ('GitHub API rate limit exceeded. Set the GITHUB_TOKEN environment variable ' +
-                                   'to increase the limit from 60 to 5,000 requests/hour.') -ExitCode 1
+            if (($statusCode -eq 403 -or $statusCode -eq 429) -and $ProviderLabel -eq 'GitHub') {
+                $remaining = $null
+                try { $remaining = [string]$_.Exception.Response.Headers['X-RateLimit-Remaining'] } catch {}
+                if ($remaining -eq '0' -or $_.Exception.Message -match 'rate limit') {
+                    throw ('GitHub API rate limit exceeded. Set the GITHUB_TOKEN environment variable ' +
+                           'to increase the limit from 60 to 5,000 requests/hour.')
                 }
             }
 
@@ -168,7 +169,7 @@ function Invoke-ApiRequest {
                 Start-Sleep -Seconds $delay
                 $delay *= 2
             } else {
-                Write-ErrorMsg "$ProviderLabel API request failed after $MaxRetries attempts: $($_.Exception.Message)" -ExitCode 1
+                throw "$ProviderLabel API request failed after $MaxRetries attempts: $($_.Exception.Message)"
             }
         }
     }
